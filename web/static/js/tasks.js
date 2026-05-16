@@ -32,7 +32,11 @@ document.addEventListener('DOMContentLoaded', function() {
         cancelCurrentTask();
         hideOTPModal();
     });
+    document.getElementById('copyCodexAuthUrlBtn').addEventListener('click', copyCodexAuthUrl);
+    document.getElementById('openCodexAuthUrlBtn').addEventListener('click', openCodexAuthUrl);
 });
+
+let currentWaitingContext = null;
 
 function initWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -81,16 +85,19 @@ function initWebSocket() {
     socket.on('waiting_for_input', function(data) {
         console.log('Waiting for input:', data);
         if (currentTaskId === data.task_id) {
-            showOTPModal(data.input_type);
+            showOTPModal(data.input_type, data.context || null);
             addLogEntry(data.message, 'WARNING');
         }
         loadTasks();
     });
     
     socket.on('task_completed', function(data) {
-        addSystemLog(`任务 ${data.task_id} 完成: ${data.email}`, 'SUCCESS');
+        addSystemLog(`任务 ${data.task_id} 完成: ${data.email || data.phone_number || ''}`, 'SUCCESS');
         if (currentTaskId === data.task_id) {
-            addLogEntry('注册成功！账号 ID: ' + data.account_id, 'SUCCESS');
+            const successText = data.account_id
+                ? ('注册成功！账号 ID: ' + data.account_id)
+                : (data.message || '手机号接码框架执行完成');
+            addLogEntry(successText, 'SUCCESS');
             document.getElementById('taskStatus').textContent = '成功';
             document.getElementById('cancelTaskBtn').disabled = true;
         }
@@ -168,15 +175,30 @@ function applyStepStatuses(stepStatus = {}) {
 function syncTaskDetail(task) {
     if (!task) return;
 
+    const identifier = task.registration_mode === 'phone'
+        ? (task.phone_number || task.email || `任务 ${task.id || task.task_id}`)
+        : (task.email || `任务 ${task.id || task.task_id}`);
+
     document.getElementById('taskStatus').textContent = getStatusText(task.status);
     document.getElementById('cancelTaskBtn').disabled = !['pending', 'running', 'waiting_for_input'].includes(task.status);
+    document.getElementById('taskIdentifier').textContent = identifier;
+
+    const metaItems = [
+        `模式: ${task.registration_mode === 'phone' ? '手机号框架' : '邮箱'}`,
+        `代理: ${task.proxy || '无'}`,
+    ];
+    if (task.phone_country) metaItems.push(`国家: ${task.phone_country}`);
+    if (task.sms_service_code) metaItems.push(`服务: ${task.sms_service_code}`);
+    if (task.sms_provider) metaItems.push(`平台: ${task.sms_provider}`);
+    if (task.sms_activation_id) metaItems.push(`激活ID: ${task.sms_activation_id}`);
+    document.getElementById('taskMeta').innerHTML = metaItems.map(item => `<span>${item}</span>`).join('');
 
     renderProgressBar();
     applyStepStatuses(task.step_status || {});
     renderTaskLogs(task.logs || []);
 
     if (task.status === 'waiting_for_input' && task.waiting_for) {
-        showOTPModal(task.waiting_for);
+        showOTPModal(task.waiting_for, task.waiting_context || null);
     } else {
         hideOTPModal();
     }
@@ -215,17 +237,27 @@ function loadTasks() {
         .then(r => r.json())
         .then(data => {
             if (data.tasks && data.tasks.length > 0) {
-                let html = '<table><tr><th>ID</th><th>邮箱</th><th>状态</th><th>代理</th><th>创建时间</th><th>操作</th></tr>';
+                let html = '<table><tr><th>ID</th><th>标识</th><th>模式</th><th>状态</th><th>代理</th><th>创建时间</th><th>操作</th></tr>';
                 data.tasks.forEach(t => {
                     const statusClass = getStatusClass(t.status);
+                    const identifier = t.registration_mode === 'phone'
+                        ? (t.phone_number || t.email || '-')
+                        : (t.email || '-');
+                    const modeText = t.registration_mode === 'phone' ? '手机号框架' : '邮箱';
+                    const safeIdentifier = String(identifier)
+                        .replace(/&/g, '&amp;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;');
                     html += `<tr>
                         <td>${t.id}</td>
-                        <td>${t.email}</td>
+                        <td>${identifier}</td>
+                        <td>${modeText}</td>
                         <td><span class="status-badge ${statusClass}">${getStatusText(t.status)}</span></td>
                         <td>${t.proxy || '无'}</td>
                         <td>${t.created_at || '-'}</td>
                         <td>
-                            <button onclick="viewTask(${t.id}, '${t.email}')">查看详情</button>
+                            <button onclick="viewTaskFromButton(this)" data-task-id="${t.id}" data-identifier="${safeIdentifier}">查看详情</button>
                             ${t.status !== 'success' && t.status !== 'failed' && t.status !== 'cancelled' ? 
                                 `<button onclick="cancelTask(${t.id})">取消</button>` : ''}
                         </td>
@@ -271,11 +303,18 @@ function viewTask(taskId, email) {
     currentTaskId = taskId;
     
     document.getElementById('taskDetailSection').style.display = 'block';
-    document.getElementById('taskEmail').textContent = email;
+    document.getElementById('taskIdentifier').textContent = email;
+    document.getElementById('taskMeta').innerHTML = '';
 
     document.getElementById('logsContainer').innerHTML = '<div style="color: #858585;">正在加载任务详情...</div>';
     fetchTaskDetail(taskId);
     startTaskRefresh(taskId);
+}
+
+function viewTaskFromButton(button) {
+    const taskId = Number(button.dataset.taskId);
+    const identifier = button.dataset.identifier || '';
+    viewTask(taskId, identifier);
 }
 
 function renderProgressBar() {
@@ -340,22 +379,34 @@ function cancelTask(taskId) {
         });
 }
 
-function showOTPModal(inputType) {
+function showOTPModal(inputType, context = null) {
     const modal = document.getElementById('otpModal');
     const promptText = document.getElementById('otpPromptText');
     const emailOtpGroup = document.getElementById('emailOtpGroup');
     const phoneOtpGroup = document.getElementById('phoneOtpGroup');
+    const codexCallbackGroup = document.getElementById('codexCallbackGroup');
+    currentWaitingContext = context;
     
     if (inputType === 'email_otp') {
         promptText.textContent = '请检查邮箱，输入收到的 6 位验证码';
         emailOtpGroup.style.display = 'block';
         phoneOtpGroup.style.display = 'none';
+        codexCallbackGroup.style.display = 'none';
         document.getElementById('emailOtpInput').focus();
     } else if (inputType === 'phone_otp') {
         promptText.textContent = '请输入手机号码和收到的验证码';
         emailOtpGroup.style.display = 'none';
         phoneOtpGroup.style.display = 'block';
+        codexCallbackGroup.style.display = 'none';
         document.getElementById('phoneNumberInput').focus();
+    } else if (inputType === 'codex_callback_url') {
+        promptText.textContent = 'Codex OAuth 自动回调未完成，请手动完成授权后提交回调 URL';
+        emailOtpGroup.style.display = 'none';
+        phoneOtpGroup.style.display = 'none';
+        codexCallbackGroup.style.display = 'block';
+        document.getElementById('codexCallbackInstructions').textContent = context?.instructions || '请打开授权链接并完成登录/授权。';
+        document.getElementById('codexAuthUrlText').textContent = context?.auth_url || '';
+        document.getElementById('codexCallbackInput').focus();
     }
     
     modal.style.display = 'flex';
@@ -366,6 +417,10 @@ function hideOTPModal() {
     document.getElementById('emailOtpInput').value = '';
     document.getElementById('phoneOtpInput').value = '';
     document.getElementById('phoneNumberInput').value = '';
+    document.getElementById('codexCallbackInput').value = '';
+    document.getElementById('codexCallbackInstructions').textContent = '';
+    document.getElementById('codexAuthUrlText').textContent = '';
+    currentWaitingContext = null;
 }
 
 function submitOTP(e) {
@@ -374,6 +429,7 @@ function submitOTP(e) {
     const emailOtp = document.getElementById('emailOtpInput').value;
     const phoneOtp = document.getElementById('phoneOtpInput').value;
     const phoneNumber = document.getElementById('phoneNumberInput').value;
+    const codexCallbackUrl = document.getElementById('codexCallbackInput').value.trim();
     
     let otpType = null;
     let otpCode = null;
@@ -384,6 +440,9 @@ function submitOTP(e) {
     } else if (phoneOtp && phoneNumber) {
         otpType = 'phone_otp';
         otpCode = phoneOtp;
+    } else if (codexCallbackUrl) {
+        otpType = 'codex_callback_url';
+        otpCode = codexCallbackUrl;
     } else {
         alert('请输入验证码');
         return;
@@ -411,4 +470,27 @@ function submitOTP(e) {
         console.error('Submit OTP error:', err);
         alert('提交失败');
     });
+}
+
+function copyCodexAuthUrl() {
+    const url = currentWaitingContext?.auth_url || document.getElementById('codexAuthUrlText').textContent;
+    if (!url) {
+        alert('当前没有可复制的授权链接');
+        return;
+    }
+    navigator.clipboard.writeText(url)
+        .then(() => addSystemLog('Codex 授权链接已复制', 'SUCCESS'))
+        .catch(err => {
+            console.error('Copy auth url error:', err);
+            alert('复制失败，请手动复制');
+        });
+}
+
+function openCodexAuthUrl() {
+    const url = currentWaitingContext?.auth_url || document.getElementById('codexAuthUrlText').textContent;
+    if (!url) {
+        alert('当前没有可打开的授权链接');
+        return;
+    }
+    window.open(url, '_blank', 'noopener');
 }

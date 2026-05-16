@@ -45,19 +45,26 @@ def extract_account_id_from_tokens(
     id_token: str | None = None,
     session_info: dict | None = None,
 ) -> str:
-    if session_info:
-        account = session_info.get("account") or {}
-        if account.get("id"):
-            return str(account["id"])
-
     for token in (id_token or "", access_token or ""):
         payload = decode_jwt_payload(token)
         auth = payload.get("https://api.openai.com/auth") or {}
         if auth.get("chatgpt_account_id"):
             return str(auth["chatgpt_account_id"])
+        if auth.get("chatgpt_account_user_id"):
+            value = str(auth["chatgpt_account_user_id"])
+            if "-" in value:
+                parts = value.split("-")
+                if len(parts) >= 6:
+                    maybe_uuid = "-".join(parts[-5:])
+                    return maybe_uuid
         orgs = auth.get("organizations") or []
         if isinstance(orgs, list) and orgs and isinstance(orgs[0], dict) and orgs[0].get("id"):
             return str(orgs[0]["id"])
+
+    if session_info:
+        account = session_info.get("account") or {}
+        if account.get("id"):
+            return str(account["id"])
 
     return ""
 

@@ -104,10 +104,45 @@
             letter-spacing: 5px;
             padding: 10px;
         }
+        .callback-box {
+            margin-top: 15px;
+            padding: 12px;
+            background: #f8f9fb;
+            border: 1px solid #e1e6ef;
+            border-radius: 8px;
+            text-align: left;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        .callback-box textarea {
+            width: 100%;
+            min-height: 120px;
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid #ccd3dd;
+            border-radius: 6px;
+            resize: vertical;
+            font-size: 13px;
+            font-family: Consolas, monospace;
+        }
+        .callback-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
         .task-controls {
             display: flex;
             gap: 10px;
             margin: 20px 0;
+        }
+        .task-meta {
+            margin: 8px 0 16px;
+            color: #58677a;
+            font-size: 14px;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
         }
     </style>
 </head>
@@ -142,7 +177,8 @@
             </section>
 
             <section class="task-detail" id="taskDetailSection" style="display: none;">
-                <h2>任务详情 - <span id="taskEmail"></span></h2>
+                <h2>任务详情 - <span id="taskIdentifier"></span></h2>
+                <div class="task-meta" id="taskMeta"></div>
                 
                 <div class="task-controls">
                     <span>状态: <strong id="taskStatus"></strong></span>
@@ -174,6 +210,19 @@
                         <input type="text" id="phoneNumberInput" placeholder="手机号码">
                         <label>手机验证码（6位）</label>
                         <input type="text" id="phoneOtpInput" class="otp-input" maxlength="6" placeholder="000000">
+                    </div>
+                    <div id="codexCallbackGroup" style="display: none;">
+                        <div class="callback-box">
+                            <div id="codexCallbackInstructions"></div>
+                            <div style="margin-top: 10px;"><strong>授权链接：</strong></div>
+                            <div id="codexAuthUrlText"></div>
+                            <div class="callback-actions">
+                                <button type="button" class="btn-secondary" id="copyCodexAuthUrlBtn">复制链接</button>
+                                <button type="button" class="btn-secondary" id="openCodexAuthUrlBtn">打开链接</button>
+                            </div>
+                            <label style="display:block; margin-top: 12px;">把浏览器最终跳转到的完整回调 URL 粘贴到下面：</label>
+                            <textarea id="codexCallbackInput" placeholder="http://localhost:1455/auth/callback?code=...&state=..."></textarea>
+                        </div>
                     </div>
                     <div style="margin-top: 20px;">
                         <button type="submit" class="btn-primary">提交验证码</button>

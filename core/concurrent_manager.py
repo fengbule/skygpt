@@ -38,7 +38,14 @@ class ConcurrentRegistrationManager:
         self.socketio = socketio
         RegistrationManager.get_instance().set_socketio(socketio)
     
-    def start_batch_registration(self, emails: List[str], proxies: List[str] = None, names: List[str] = None, birthdays: List[str] = None) -> List[Dict]:
+    def start_batch_registration(
+        self,
+        emails: List[str],
+        proxies: List[str] = None,
+        names: List[str] = None,
+        birthdays: List[str] = None,
+        **task_options,
+    ) -> List[Dict]:
         tasks = []
         
         for i, email in enumerate(emails):
@@ -46,21 +53,28 @@ class ConcurrentRegistrationManager:
             name = names[i] if names and i < len(names) else None
             birthday = birthdays[i] if birthdays and i < len(birthdays) else "2000-01-01"
             
-            task_data = TaskDB.create_task(email=email, name=name, birthday=birthday, proxy=proxy)
+            task_data = TaskDB.create_task(email=email, name=name, birthday=birthday, proxy=proxy, **task_options)
             tasks.append(task_data)
             
             reg_manager = RegistrationManager.get_instance()
-            reg_manager.start_task(task_data["id"], email, name, birthday, proxy)
+            reg_manager.start_task(task_data["id"], email, name, birthday, proxy, **task_options)
         
         logger.info(f"Started batch registration with {len(tasks)} tasks")
         
         return tasks
     
-    def start_single_registration(self, email: str, proxy: str = None, name: str = None, birthday: str = "2000-01-01") -> Dict:
-        task_data = TaskDB.create_task(email=email, name=name, birthday=birthday, proxy=proxy)
+    def start_single_registration(
+        self,
+        email: str,
+        proxy: str = None,
+        name: str = None,
+        birthday: str = "2000-01-01",
+        **task_options,
+    ) -> Dict:
+        task_data = TaskDB.create_task(email=email, name=name, birthday=birthday, proxy=proxy, **task_options)
         
         reg_manager = RegistrationManager.get_instance()
-        reg_manager.start_task(task_data["id"], email, name, birthday, proxy)
+        reg_manager.start_task(task_data["id"], email, name, birthday, proxy, **task_options)
         
         logger.info(f"Started single registration for {email} with task ID {task_data['id']}")
         

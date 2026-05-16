@@ -12,6 +12,60 @@ from typing import Optional, List, Dict, Any
 DATA_DIR = Path(__file__).parent.parent / "data"
 DB_PATH = DATA_DIR / "skygpt.db"
 
+TASK_EXTRA_COLUMNS = {
+    "registration_mode": "TEXT DEFAULT 'email'",
+    "phone_country": "TEXT",
+    "sms_service_code": "TEXT",
+    "sms_operator": "TEXT",
+    "sms_activation_id": "TEXT",
+    "phone_number": "TEXT",
+    "sms_provider": "TEXT",
+}
+
+
+def _ensure_task_columns(cursor) -> None:
+    cursor.execute("PRAGMA table_info(registration_tasks)")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    for column_name, ddl in TASK_EXTRA_COLUMNS.items():
+        if column_name not in existing_columns:
+            cursor.execute(f"ALTER TABLE registration_tasks ADD COLUMN {column_name} {ddl}")
+
+
+def _task_row_to_dict(row) -> Dict[str, Any]:
+    if not row:
+        return None
+
+    task = {
+        "id": row[0],
+        "email": row[1],
+        "name": row[2],
+        "birthday": row[3],
+        "proxy": row[4],
+        "status": row[5],
+        "created_at": row[6],
+        "started_at": row[7],
+        "completed_at": row[8],
+        "error": row[9],
+        "account_id": row[10],
+        "access_token": row[11],
+        "log_file": row[12],
+        "registration_mode": "email",
+        "phone_country": None,
+        "sms_service_code": None,
+        "sms_operator": None,
+        "sms_activation_id": None,
+        "phone_number": None,
+        "sms_provider": None,
+    }
+
+    extra_keys = list(TASK_EXTRA_COLUMNS.keys())
+    for offset, key in enumerate(extra_keys, start=13):
+        if len(row) > offset:
+            task[key] = row[offset]
+
+    task["registration_mode"] = (task.get("registration_mode") or "email").lower()
+    return task
+
 def init_database():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -62,6 +116,8 @@ def init_database():
             disabled INTEGER DEFAULT 0
         )
     """)
+
+    _ensure_task_columns(cursor)
     
     conn.commit()
     conn.close()
@@ -71,16 +127,47 @@ def get_connection():
 
 class TaskDB:
     @staticmethod
-    def create_task(email: str, name: str = None, birthday: str = None, proxy: str = None) -> Dict:
+    def create_task(
+        email: str,
+        name: str = None,
+        birthday: str = None,
+        proxy: str = None,
+        registration_mode: str = "email",
+        phone_country: str = None,
+        sms_service_code: str = None,
+        sms_operator: str = None,
+        sms_activation_id: str = None,
+        phone_number: str = None,
+        sms_provider: str = None,
+    ) -> Dict:
         conn = get_connection()
         cursor = conn.cursor()
         now = datetime.now().isoformat(timespec="seconds")
         log_file = str(DATA_DIR / f"logs/task_{now.replace(':', '-')}.log")
+        registration_mode = (registration_mode or "email").strip().lower()
         
         cursor.execute("""
-            INSERT INTO registration_tasks (email, name, birthday, proxy, status, created_at, log_file)
-            VALUES (?, ?, ?, ?, 'pending', ?, ?)
-        """, (email, name, birthday, proxy, now, log_file))
+            INSERT INTO registration_tasks (
+                email, name, birthday, proxy, status, created_at, log_file,
+                registration_mode, phone_country, sms_service_code, sms_operator,
+                sms_activation_id, phone_number, sms_provider
+            )
+            VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            email,
+            name,
+            birthday,
+            proxy,
+            now,
+            log_file,
+            registration_mode,
+            phone_country,
+            sms_service_code,
+            sms_operator,
+            sms_activation_id,
+            phone_number,
+            sms_provider,
+        ))
         
         task_id = cursor.lastrowid
         conn.commit()
@@ -94,7 +181,14 @@ class TaskDB:
             "proxy": proxy,
             "status": "pending",
             "created_at": now,
-            "log_file": log_file
+            "log_file": log_file,
+            "registration_mode": registration_mode,
+            "phone_country": phone_country,
+            "sms_service_code": sms_service_code,
+            "sms_operator": sms_operator,
+            "sms_activation_id": sms_activation_id,
+            "phone_number": phone_number,
+            "sms_provider": sms_provider,
         }
     
     @staticmethod
@@ -104,34 +198,23 @@ class TaskDB:
         cursor.execute("SELECT * FROM registration_tasks WHERE id = ?", (task_id,))
         row = cursor.fetchone()
         conn.close()
-        
-        if row:
-            return {
-                "id": row[0],
-                "email": row[1],
-                "name": row[2],
-                "birthday": row[3],
-                "proxy": row[4],
-                "status": row[5],
-                "created_at": row[6],
-                "started_at": row[7],
-                "completed_at": row[8],
-                "error": row[9],
-                "account_id": row[10],
-                "access_token": row[11],
-                "log_file": row[12]
-            }
-        return None
+        return _task_row_to_dict(row)
     
     @staticmethod
     def update_task(task_id: int, **kwargs) -> bool:
         conn = get_connection()
         cursor = conn.cursor()
         
-        valid_fields = ["status", "started_at", "completed_at", "error", "account_id", "access_token"]
+        valid_fields = [
+            "status", "started_at", "completed_at", "error", "account_id", "access_token",
+            "registration_mode", "phone_country", "sms_service_code", "sms_operator",
+            "sms_activation_id", "phone_number", "sms_provider",
+        ]
         updates = {}
         for field, value in kwargs.items():
             if field in valid_fields:
+                if field == "registration_mode":
+                    value = (value or "email").strip().lower()
                 updates[field] = value
         
         if not updates:
@@ -161,21 +244,7 @@ class TaskDB:
         
         tasks = []
         for row in rows:
-            tasks.append({
-                "id": row[0],
-                "email": row[1],
-                "name": row[2],
-                "birthday": row[3],
-                "proxy": row[4],
-                "status": row[5],
-                "created_at": row[6],
-                "started_at": row[7],
-                "completed_at": row[8],
-                "error": row[9],
-                "account_id": row[10],
-                "access_token": row[11],
-                "log_file": row[12]
-            })
+            tasks.append(_task_row_to_dict(row))
         return tasks
 
 class ProxyDB:

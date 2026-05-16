@@ -24,8 +24,53 @@
                 <h2>创建注册任务</h2>
                 <form id="registrationForm">
                     <div class="form-group">
+                        <label for="registrationMode">注册模式</label>
+                        <select id="registrationMode" name="registrationMode">
+                            <option value="email">邮箱注册</option>
+                            <option value="phone">手机号框架（多短信平台）</option>
+                        </select>
+                        <small style="display:block; margin-top:6px; color:#666;">手机号模式当前只会执行接码状态机，不会提交 OpenAI 手机验证。</small>
+                    </div>
+
+                    <div class="form-group">
                         <label for="email">邮箱地址 *</label>
                         <input type="email" id="email" name="email" required placeholder="your.email@example.com">
+                    </div>
+
+                    <div id="phoneModeSection" style="display: none;">
+                        <div class="form-group">
+                            <label for="phoneCountry">接码国家/地区</label>
+                            <input type="text" id="phoneCountry" name="phoneCountry" placeholder="例如 0 / hk / us">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="smsServiceCode">短信服务代码</label>
+                            <input type="text" id="smsServiceCode" name="smsServiceCode" placeholder="例如 openai / go / ot">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="smsOperator">运营商（可选）</label>
+                            <input type="text" id="smsOperator" name="smsOperator" placeholder="可留空，使用默认运营商筛选">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="smsProvider">短信平台</label>
+                            <select id="smsProvider" name="smsProvider">
+                                <option value="hero_sms">HeroSMS</option>
+                                <option value="sms_activate">SMS-Activate</option>
+                                <option value="api_cc">api.cc（预留）</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="smsApiKey">短信平台 API Key（可选覆盖）</label>
+                            <input type="password" id="smsApiKey" name="smsApiKey" placeholder="不填则使用服务端对应 provider 的环境变量">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="smsBaseUrl">短信平台 Base URL（可选覆盖）</label>
+                            <input type="text" id="smsBaseUrl" name="smsBaseUrl" placeholder="不填则使用服务端 provider 默认地址">
+                        </div>
                     </div>
 
                     <div class="form-group">

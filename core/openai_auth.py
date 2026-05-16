@@ -329,6 +329,7 @@ def create_account(session: BrowserSession, name: str, birthday: str, sentinel_h
 
     if resp.status_code != 200:
         logger.error(f"[步骤12] 请求失败, 状态码: {resp.status_code}")
+        logger.error(f"[步骤12] 响应头: {dict(resp.headers)}")
         logger.error(f"[步骤12] 响应内容: {resp.text}")
         resp.raise_for_status()
 

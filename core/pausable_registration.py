@@ -9,7 +9,7 @@ import time
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from concurrent.futures import ThreadPoolExecutor
 import random
 import string
@@ -21,7 +21,21 @@ from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import follow_authorize, request_sentinel_token, build_sentinel_header, validate_email_otp, create_account
 from core.account_export import follow_oauth_callback, fetch_session, extract_account_id_from_tokens
-from core.codex_oauth import acquire_codex_tokens
+from core.codex_oauth import (
+    acquire_codex_tokens,
+    validate_codex_token_set,
+    prepare_codex_oauth_request,
+    exchange_codex_callback_url,
+)
+from core.sms_provider import (
+    acquire_phone_number as sms_acquire_phone_number,
+    wait_for_sms_code as sms_wait_for_sms_code,
+    finish_activation as sms_finish_activation,
+    cancel_activation as sms_cancel_activation,
+    SMSProviderError,
+    SMSProviderTimeout,
+    SMSProviderCancelled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,19 +60,53 @@ class PausableRegistration:
     def set_socketio(self, socketio):
         self.socketio = socketio
     
-    def start_task(self, task_id: int, email: str, name: str = None, birthday: str = "2000-01-01", proxy: str = None):
+    def start_task(
+        self,
+        task_id: int,
+        email: str,
+        name: str = None,
+        birthday: str = "2000-01-01",
+        proxy: str = None,
+        registration_mode: str = "email",
+        phone_country: str = None,
+        sms_service_code: str = None,
+        sms_operator: str = None,
+        sms_provider: str = None,
+        sms_api_key: str = None,
+        sms_base_url: str = None,
+        sms_poll_interval: int = None,
+        sms_max_wait: int = None,
+        sms_max_price: float = None,
+    ):
         db_task = TaskDB.get_task(task_id) or {}
+        registration_mode = (registration_mode or db_task.get("registration_mode") or "email").strip().lower()
         task_data = {
             "task_id": task_id,
             "email": email,
             "name": name or self._generate_display_name(),
             "birthday": birthday,
             "proxy": proxy,
+            "registration_mode": registration_mode,
+            "phone_country": phone_country or db_task.get("phone_country"),
+            "sms_service_code": sms_service_code or db_task.get("sms_service_code"),
+            "sms_operator": sms_operator or db_task.get("sms_operator"),
+            "sms_provider": sms_provider or db_task.get("sms_provider") or "hero_sms",
+            "sms_api_key": sms_api_key,
+            "sms_base_url": sms_base_url,
+            "sms_poll_interval": sms_poll_interval,
+            "sms_max_wait": sms_max_wait,
+            "sms_max_price": sms_max_price,
+            "sms_activation_id": db_task.get("sms_activation_id"),
+            "phone_number": db_task.get("phone_number"),
+            "sms_last_status": None,
+            "sms_code": None,
+            "sms_activation_closed": False,
             "log_file": db_task.get("log_file"),
             "status": "pending",
             "current_step": 0,
             "step_status": {},
             "waiting_for": None,
+            "waiting_context": None,
             "otp_data": {},
             "logs": [],
             "started_at": None,
@@ -75,11 +123,11 @@ class PausableRegistration:
         self.executor.submit(self._run_registration_task, task_id)
         
         self._emit_task_update(task_id, "task_started", {
-            "message": f"任务已启动：{email}",
+            "message": f"任务已启动：{email or phone_country or f'task-{task_id}'}",
             "total_steps": get_total_steps()
         })
         
-        logger.info(f"[Task {task_id}] Started for {email}")
+        logger.info(f"[Task {task_id}] Started for mode={registration_mode}, email={email}")
     
     def _generate_display_name(self):
         first = random.choice(string.ascii_uppercase) + "".join(random.choices(string.ascii_lowercase, k=random.randint(3, 6)))
@@ -141,19 +189,157 @@ class PausableRegistration:
                 **data,
                 "timestamp": datetime.now().isoformat(timespec="seconds")
             })
+
+    def _build_sms_settings(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "provider": task_data.get("sms_provider") or "hero_sms",
+            "api_key": task_data.get("sms_api_key"),
+            "base_url": task_data.get("sms_base_url"),
+            "default_country": task_data.get("phone_country"),
+            "default_service": task_data.get("sms_service_code"),
+            "operator": task_data.get("sms_operator"),
+            "poll_interval": task_data.get("sms_poll_interval"),
+            "max_wait": task_data.get("sms_max_wait"),
+            "max_price": task_data.get("sms_max_price"),
+        }
+
+    def _close_sms_activation(self, task_id: int, finish: bool = False) -> None:
+        task_data = self.tasks.get(task_id)
+        if not task_data:
+            return
+
+        activation_id = task_data.get("sms_activation_id")
+        if not activation_id or task_data.get("sms_activation_closed"):
+            return
+
+        try:
+            settings = self._build_sms_settings(task_data)
+            if finish:
+                result = sms_finish_activation(activation_id, provider=task_data.get("sms_provider"), settings=settings)
+                self._add_log(task_id, f"短信激活已完成: {result.get('status') or result.get('raw')}")
+            else:
+                result = sms_cancel_activation(activation_id, provider=task_data.get("sms_provider"), settings=settings)
+                self._add_log(task_id, f"短信激活已取消: {result.get('status') or result.get('raw')}", "WARNING")
+            task_data["sms_activation_closed"] = True
+            task_data["sms_last_status"] = result.get("status") or task_data.get("sms_last_status")
+        except Exception as exc:
+            self._add_log(task_id, f"短信激活收尾失败: {exc}", "WARNING")
+
+    def _complete_phone_framework_task(self, task_id: int, summary: str):
+        task_data = self.tasks.get(task_id)
+        if task_data:
+            task_data["status"] = "success"
+            task_data["waiting_for"] = None
+            task_data["waiting_context"] = None
+            task_data["completed_at"] = datetime.now().isoformat(timespec="seconds")
+
+            TaskDB.update_task(
+                task_id,
+                status="success",
+                completed_at=task_data["completed_at"],
+                sms_activation_id=task_data.get("sms_activation_id"),
+                phone_number=task_data.get("phone_number"),
+                sms_provider=task_data.get("sms_provider"),
+            )
+
+            self._add_log(task_id, summary, "SUCCESS")
+            self._emit_task_update(task_id, "task_completed", {
+                "email": task_data.get("email") or task_data.get("phone_number") or f"task-{task_id}",
+                "account_id": None,
+                "phone_number": task_data.get("phone_number"),
+                "registration_mode": task_data.get("registration_mode"),
+                "message": summary,
+            })
+
+            logger.info(f"[Task {task_id}] Phone framework completed")
+
+    def _run_phone_framework_task(self, task_id: int):
+        task_data = self.tasks.get(task_id)
+        if not task_data:
+            return
+
+        settings = self._build_sms_settings(task_data)
+        phone_country = task_data.get("phone_country")
+        sms_service_code = task_data.get("sms_service_code")
+        sms_operator = task_data.get("sms_operator")
+
+        self._add_log(
+            task_id,
+            f"开始手机号接码框架：provider={task_data.get('sms_provider')}, country={phone_country}, service={sms_service_code}",
+        )
+
+        self._update_step(task_id, 1, "running", "正在初始化 HeroSMS 提供者...")
+        self._update_step(task_id, 1, "completed", "短信提供者初始化完成")
+
+        self._update_step(task_id, 2, "running", "正在申请手机号...")
+        activation = sms_acquire_phone_number(
+            provider=task_data.get("sms_provider"),
+            settings=settings,
+            country=phone_country,
+            service=sms_service_code,
+            operator=sms_operator,
+            max_price=task_data.get("sms_max_price"),
+        )
+        task_data["sms_activation_id"] = activation.get("activation_id")
+        task_data["phone_number"] = activation.get("phone_number")
+        task_data["sms_last_status"] = activation.get("status")
+        TaskDB.update_task(
+            task_id,
+            sms_activation_id=task_data["sms_activation_id"],
+            phone_number=task_data["phone_number"],
+            sms_provider=task_data.get("sms_provider"),
+        )
+        self._update_step(task_id, 2, "completed", f"已获取号码 {task_data['phone_number']}")
+        self._add_log(task_id, f"HeroSMS 激活成功：activation_id={task_data['sms_activation_id']}, phone={task_data['phone_number']}")
+
+        for step_id in (3, 4, 5, 6, 7):
+            task_data["step_status"][step_id] = "completed"
+
+        task_data["waiting_context"] = {
+            "mode": "phone_framework",
+            "provider": task_data.get("sms_provider"),
+            "phone_number": task_data.get("phone_number"),
+            "activation_id": task_data.get("sms_activation_id"),
+            "service": sms_service_code,
+            "country": phone_country,
+            "note": "当前阶段仅轮询 HeroSMS 短信验证码，不会提交到 OpenAI 手机验证接口。",
+        }
+
+        self._update_step(task_id, 8, "running", "正在轮询短信验证码（仅框架，不提交 OpenAI）...")
+        code_result = sms_wait_for_sms_code(
+            task_data["sms_activation_id"],
+            provider=task_data.get("sms_provider"),
+            settings=settings,
+            poll_interval=task_data.get("sms_poll_interval"),
+            max_wait=task_data.get("sms_max_wait"),
+        )
+        task_data["sms_last_status"] = code_result.get("status")
+        task_data["sms_code"] = code_result.get("code")
+        self._update_step(task_id, 8, "completed", f"已收到验证码 {task_data['sms_code']}")
+        self._add_log(task_id, f"HeroSMS 收到验证码：{task_data['sms_code']}", "SUCCESS")
+
+        for step_id in (9, 10, 11):
+            task_data["step_status"][step_id] = "completed"
+
+        self._update_step(task_id, 12, "running", "正在完成号码状态机收尾...")
+        self._close_sms_activation(task_id, finish=True)
+        self._update_step(task_id, 12, "completed", "号码状态机收尾完成，等待后续接 OpenAI 手机验证")
+        self._complete_phone_framework_task(task_id, "手机号接码框架完成，验证码已获取并记录，尚未提交 OpenAI 手机验证")
     
-    def _wait_for_user_input(self, task_id: int, input_type: str, timeout: int = 600):
+    def _wait_for_user_input(self, task_id: int, input_type: str, timeout: int = 600, context: Dict | None = None):
         task_data = self.tasks.get(task_id)
         if not task_data:
             return None
         
         task_data["status"] = "waiting_for_input"
         task_data["waiting_for"] = input_type
+        task_data["waiting_context"] = context or None
         TaskDB.update_task(task_id, status="waiting_for_input")
         
         self._emit_task_update(task_id, "waiting_for_input", {
             "input_type": input_type,
-            "message": f"等待用户输入 {input_type}（超时时间：{timeout}秒）"
+            "message": f"等待用户输入 {input_type}（超时时间：{timeout}秒）",
+            "context": task_data["waiting_context"],
         })
         
         start_time = time.time()
@@ -165,12 +351,14 @@ class PausableRegistration:
             if otp_data:
                 task_data["status"] = "running"
                 task_data["waiting_for"] = None
+                task_data["waiting_context"] = None
                 TaskDB.update_task(task_id, status="running")
                 return otp_data
             
             time.sleep(0.5)
         
         task_data["status"] = "timeout"
+        task_data["waiting_context"] = None
         self._add_log(task_id, f"等待 {input_type} 超时", "ERROR")
         return None
     
@@ -183,6 +371,18 @@ class PausableRegistration:
             TaskDB.update_task(task_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
             task_data["status"] = "running"
             task_data["started_at"] = datetime.now().isoformat(timespec="seconds")
+            TaskDB.update_task(
+                task_id,
+                registration_mode=task_data.get("registration_mode"),
+                phone_country=task_data.get("phone_country"),
+                sms_service_code=task_data.get("sms_service_code"),
+                sms_operator=task_data.get("sms_operator"),
+                sms_provider=task_data.get("sms_provider"),
+            )
+
+            if task_data.get("registration_mode") == "phone":
+                self._run_phone_framework_task(task_id)
+                return
             
             email = task_data["email"]
             name = task_data["name"]
@@ -263,12 +463,58 @@ class PausableRegistration:
             self._update_step(task_id, 11, "completed", f"获取 Token 成功")
             
             self._update_step(task_id, 12, "running", "正在获取 Codex OAuth 凭据并生成 CPA 文件...")
-            codex_tokens = acquire_codex_tokens(session, session_info=session_info)
+            codex_tokens = None
+            try:
+                codex_tokens = acquire_codex_tokens(session, session_info=session_info)
+                is_valid_codex, codex_reason = validate_codex_token_set(codex_tokens)
+                self._add_log(
+                    task_id,
+                    f"Codex OAuth 结果校验: valid={is_valid_codex}, reason={codex_reason}, "
+                    f"has_refresh={bool(codex_tokens.get('refresh_token'))}, has_id={bool(codex_tokens.get('id_token'))}",
+                )
+            except Exception as codex_exc:
+                self._add_log(task_id, f"Codex OAuth 自动获取失败: {codex_exc}", "WARNING")
+                manual_request = prepare_codex_oauth_request()
+                manual_context = {
+                    "auth_url": manual_request["authorization_url"],
+                    "redirect_uri": manual_request["redirect_uri"],
+                    "instructions": "请在浏览器打开授权链接，完成登录/授权后，把跳转到 localhost:1455 的完整回调 URL 粘贴回来。",
+                }
+                self._update_step(task_id, 12, "waiting", "等待手动完成 Codex OAuth 授权回调...")
+                self._add_log(task_id, f"Codex 手动授权链接: {manual_request['authorization_url']}")
+                callback_input = self._wait_for_user_input(
+                    task_id,
+                    "codex_callback_url",
+                    timeout=1800,
+                    context=manual_context,
+                )
+                if not callback_input:
+                    self._fail_task(task_id, "未收到 Codex OAuth 回调 URL 或等待超时")
+                    return
+                callback_url = callback_input.get("otp_code")
+                self._add_log(task_id, "收到 Codex 回调 URL，正在交换 token...")
+                codex_tokens = exchange_codex_callback_url(
+                    callback_url,
+                    manual_request["code_verifier"],
+                    manual_request["state"],
+                    session_info=session_info,
+                )
+                is_valid_codex, codex_reason = validate_codex_token_set(codex_tokens)
+                self._add_log(
+                    task_id,
+                    f"Codex 手动回调结果校验: valid={is_valid_codex}, reason={codex_reason}, "
+                    f"has_refresh={bool(codex_tokens.get('refresh_token'))}, has_id={bool(codex_tokens.get('id_token'))}",
+                )
+
             codex_access_token = codex_tokens.get("access_token") or access_token
             account_id = extract_account_id_from_tokens(
                 codex_access_token,
                 codex_tokens.get("id_token"),
                 session_info=session_info,
+            )
+            self._add_log(
+                task_id,
+                f"Codex / CPA 候选 account_id={account_id}, using_client_token={'codex' if codex_tokens.get('access_token') else 'web'}",
             )
             
             account_data = {
@@ -284,9 +530,14 @@ class PausableRegistration:
             
             self._complete_task(task_id, email, account_id, codex_access_token, cpa_data)
         
+        except (SMSProviderTimeout, SMSProviderCancelled, SMSProviderError) as sms_exc:
+            self._add_log(task_id, f"短信流程异常: {sms_exc}", "ERROR")
+            self._close_sms_activation(task_id, finish=False)
+            self._fail_task(task_id, str(sms_exc))
         except Exception as e:
             error_msg = str(e)[:500]
             self._add_log(task_id, f"异常错误: {error_msg}", "ERROR")
+            self._close_sms_activation(task_id, finish=False)
             self._fail_task(task_id, error_msg)
     
     def _complete_task(self, task_id: int, email: str, account_id: str, access_token: str, cpa_data: Dict):
@@ -294,6 +545,7 @@ class PausableRegistration:
         if task_data:
             task_data["status"] = "success"
             task_data["waiting_for"] = None
+            task_data["waiting_context"] = None
             task_data["completed_at"] = datetime.now().isoformat(timespec="seconds")
             
             TaskDB.update_task(
@@ -330,6 +582,7 @@ class PausableRegistration:
         if task_data:
             task_data["status"] = "failed"
             task_data["waiting_for"] = None
+            task_data["waiting_context"] = None
             task_data["completed_at"] = datetime.now().isoformat(timespec="seconds")
             
             TaskDB.update_task(task_id, status="failed", error=error, completed_at=datetime.now().isoformat(timespec="seconds"))
@@ -370,7 +623,9 @@ class PausableRegistration:
             return False
         
         task_data["status"] = "cancelled"
+        task_data["waiting_context"] = None
         task_data["completed_at"] = datetime.now().isoformat(timespec="seconds")
+        self._close_sms_activation(task_id, finish=False)
         
         TaskDB.update_task(task_id, status="cancelled", completed_at=datetime.now().isoformat(timespec="seconds"))
         
@@ -398,10 +653,20 @@ class PausableRegistration:
             "name": task_data.get("name"),
             "birthday": task_data.get("birthday"),
             "proxy": task_data.get("proxy"),
+            "registration_mode": task_data.get("registration_mode"),
+            "phone_country": task_data.get("phone_country"),
+            "sms_service_code": task_data.get("sms_service_code"),
+            "sms_operator": task_data.get("sms_operator"),
+            "sms_provider": task_data.get("sms_provider"),
+            "sms_activation_id": task_data.get("sms_activation_id"),
+            "phone_number": task_data.get("phone_number"),
+            "sms_last_status": task_data.get("sms_last_status"),
+            "sms_code": task_data.get("sms_code"),
             "status": task_data.get("status"),
             "current_step": task_data.get("current_step", 0),
             "step_status": dict(task_data.get("step_status", {})),
             "waiting_for": task_data.get("waiting_for"),
+            "waiting_context": task_data.get("waiting_context"),
             "started_at": task_data.get("started_at"),
             "completed_at": task_data.get("completed_at"),
             "logs": list(task_data.get("logs", [])),

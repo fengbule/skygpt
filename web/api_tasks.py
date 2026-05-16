@@ -60,6 +60,16 @@ def _merge_runtime_task(task):
         "current_step": runtime_task.get("current_step", 0),
         "step_status": runtime_task.get("step_status", {}),
         "waiting_for": runtime_task.get("waiting_for"),
+        "waiting_context": runtime_task.get("waiting_context"),
+        "registration_mode": runtime_task.get("registration_mode", merged.get("registration_mode")),
+        "phone_country": runtime_task.get("phone_country", merged.get("phone_country")),
+        "sms_service_code": runtime_task.get("sms_service_code", merged.get("sms_service_code")),
+        "sms_operator": runtime_task.get("sms_operator", merged.get("sms_operator")),
+        "sms_provider": runtime_task.get("sms_provider", merged.get("sms_provider")),
+        "sms_activation_id": runtime_task.get("sms_activation_id", merged.get("sms_activation_id")),
+        "phone_number": runtime_task.get("phone_number", merged.get("phone_number")),
+        "sms_last_status": runtime_task.get("sms_last_status"),
+        "sms_code": runtime_task.get("sms_code"),
         "logs": runtime_logs or persisted_logs,
     })
 
@@ -79,23 +89,56 @@ def _merge_runtime_task(task):
 def create_task():
     try:
         data = request.get_json() or {}
-        email = data.get("email")
+        registration_mode = (data.get("registration_mode") or "email").strip().lower()
+        email = (data.get("email") or "").strip()
         name = data.get("name")
         birthday = data.get("birthday", "2000-01-01")
         proxy = data.get("proxy")
+        phone_country = data.get("phone_country")
+        sms_service_code = data.get("sms_service_code")
+        sms_operator = data.get("sms_operator")
+        sms_provider = data.get("sms_provider") or "hero_sms"
+        sms_api_key = data.get("sms_api_key")
+        sms_base_url = data.get("sms_base_url")
+        sms_poll_interval = data.get("sms_poll_interval")
+        sms_max_wait = data.get("sms_max_wait")
+        sms_max_price = data.get("sms_max_price")
         
-        if not email:
+        if registration_mode not in {"email", "phone"}:
+            return jsonify({"error": "registration_mode must be 'email' or 'phone'"}), 400
+
+        if registration_mode == "email" and not email:
             return jsonify({"error": "Email is required"}), 400
         
-        task = TaskDB.create_task(email=email, name=name, birthday=birthday, proxy=proxy)
+        task = TaskDB.create_task(
+            email=email,
+            name=name,
+            birthday=birthday,
+            proxy=proxy,
+            registration_mode=registration_mode,
+            phone_country=phone_country,
+            sms_service_code=sms_service_code,
+            sms_operator=sms_operator,
+            sms_provider=sms_provider,
+        )
         RegistrationManager.get_instance().start_task(
             task["id"],
             email=email,
             name=name,
             birthday=birthday,
             proxy=proxy,
+            registration_mode=registration_mode,
+            phone_country=phone_country,
+            sms_service_code=sms_service_code,
+            sms_operator=sms_operator,
+            sms_provider=sms_provider,
+            sms_api_key=sms_api_key,
+            sms_base_url=sms_base_url,
+            sms_poll_interval=sms_poll_interval,
+            sms_max_wait=sms_max_wait,
+            sms_max_price=sms_max_price,
         )
-        logger.info(f"Created task {task['id']} for email {email}")
+        logger.info(f"Created task {task['id']} for mode={registration_mode}, email={email or '-'}")
         
         return jsonify({
             "success": True,
