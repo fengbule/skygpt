@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>代理管理 - SkyGPT</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SkyGPT</h1>
+            <nav>
+                <a href="/">注册</a>
+                <a href="/tasks">任务</a>
+                <a href="/proxies">代理</a>
+                <a href="/cpa">CPA文件</a>
+            </nav>
+        </header>
+
+        <main>
+            <section class="proxy-add">
+                <h2>添加代理</h2>
+                <form id="addProxyForm">
+                    <input type="text" id="proxyUrl" placeholder="socks5://user:pass@host:port" required>
+                    <button type="submit">添加代理</button>
+                    <button type="button" id="testProxyBtn">测试连通性</button>
+                </form>
+                <div id="proxyTestResult"></div>
+            </section>
+
+            <section class="proxy-import">
+                <h2>导入订阅</h2>
+                <form id="importSubForm">
+                    <input type="text" id="subscriptionUrl" placeholder="订阅链接" required>
+                    <button type="submit">导入订阅</button>
+                </form>
+            </section>
+
+            <section class="proxy-list">
+                <h2>代理列表</h2>
+                <button id="testAllBtn">测试所有代理</button>
+                <div id="proxiesTable"></div>
+            </section>
+        </main>
+    </div>
+    <script src="/static/js/proxies.js"></script>
+</body>
+</html>
