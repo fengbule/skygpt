@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
+from web.api_settings import settings_bp
+from web.api_sms import sms_bp
 from web.api_tasks import task_bp
 from web.api_proxies import proxy_bp
 from web.api_cpa import cpa_bp
@@ -38,6 +40,8 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 app.register_blueprint(task_bp)
 app.register_blueprint(proxy_bp)
 app.register_blueprint(cpa_bp)
+app.register_blueprint(sms_bp)
+app.register_blueprint(settings_bp)
 
 
 def _select_socketio_mode() -> str:
@@ -86,6 +90,10 @@ def tasks_page():
 @app.route("/proxies")
 def proxies_page():
     return render_template("proxies.html")
+
+@app.route("/settings")
+def settings_page():
+    return render_template("settings.html")
 
 @app.route("/cpa")
 def cpa_page():

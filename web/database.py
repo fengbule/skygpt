@@ -22,6 +22,12 @@ TASK_EXTRA_COLUMNS = {
     "sms_provider": "TEXT",
 }
 
+SMS_SETTING_DEFAULTS = {
+    "auto_select_best_country": False,
+    "best_country_min_stock": 20,
+    "best_country_max_price": 0,
+}
+
 
 def _ensure_task_columns(cursor) -> None:
     cursor.execute("PRAGMA table_info(registration_tasks)")
@@ -114,6 +120,19 @@ def init_database():
             expired TEXT,
             created_at TEXT,
             disabled INTEGER DEFAULT 0
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sms_provider_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider TEXT NOT NULL UNIQUE,
+            display_name TEXT,
+            enabled INTEGER DEFAULT 1,
+            is_default INTEGER DEFAULT 0,
+            config_json TEXT,
+            created_at TEXT,
+            updated_at TEXT
         )
     """)
 
@@ -435,5 +454,110 @@ class AccountDB:
                 "disabled": row[9]
             })
         return accounts
+
+
+class SMSProviderSettingsDB:
+    @staticmethod
+    def _row_to_dict(row) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        try:
+            config = json.loads(row[5] or "{}")
+        except Exception:
+            config = {}
+        if not isinstance(config, dict):
+            config = {}
+        merged_config = {**SMS_SETTING_DEFAULTS, **config}
+        return {
+            "id": row[0],
+            "provider": row[1],
+            "display_name": row[2] or row[1],
+            "enabled": bool(row[3]),
+            "is_default": bool(row[4]),
+            "config": merged_config,
+            "created_at": row[6],
+            "updated_at": row[7],
+        }
+
+    @staticmethod
+    def list_provider_settings() -> List[Dict[str, Any]]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, provider, display_name, enabled, is_default, config_json, created_at, updated_at FROM sms_provider_settings ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return [item for item in (SMSProviderSettingsDB._row_to_dict(row) for row in rows) if item]
+
+    @staticmethod
+    def get_provider_setting(provider: str) -> Optional[Dict[str, Any]]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, provider, display_name, enabled, is_default, config_json, created_at, updated_at FROM sms_provider_settings WHERE provider = ?",
+            (provider,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return SMSProviderSettingsDB._row_to_dict(row)
+
+    @staticmethod
+    def get_default_provider() -> Optional[str]:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT provider FROM sms_provider_settings WHERE enabled = 1 AND is_default = 1 ORDER BY id ASC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row[0]) if row and row[0] else None
+
+    @staticmethod
+    def save_provider_setting(
+        provider: str,
+        *,
+        display_name: str | None = None,
+        enabled: bool = True,
+        is_default: bool = False,
+        config: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        provider = (provider or "").strip().lower()
+        if not provider:
+            raise ValueError("provider 不能为空")
+
+        now = datetime.now().isoformat(timespec="seconds")
+        payload = {**SMS_SETTING_DEFAULTS, **dict(config or {})}
+
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id, created_at FROM sms_provider_settings WHERE provider = ?", (provider,))
+        existing = cursor.fetchone()
+
+        if is_default:
+            cursor.execute("UPDATE sms_provider_settings SET is_default = 0, updated_at = ?", (now,))
+
+        if existing:
+            setting_id, created_at = existing
+            cursor.execute(
+                """
+                UPDATE sms_provider_settings
+                SET display_name = ?, enabled = ?, is_default = ?, config_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (display_name or provider, int(bool(enabled)), int(bool(is_default)), json.dumps(payload, ensure_ascii=False), now, setting_id),
+            )
+        else:
+            created_at = now
+            cursor.execute(
+                """
+                INSERT INTO sms_provider_settings (provider, display_name, enabled, is_default, config_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (provider, display_name or provider, int(bool(enabled)), int(bool(is_default)), json.dumps(payload, ensure_ascii=False), created_at, now),
+            )
+
+        conn.commit()
+        conn.close()
+        return SMSProviderSettingsDB.get_provider_setting(provider)
 
 init_database()

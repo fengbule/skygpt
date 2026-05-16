@@ -16,7 +16,7 @@ from typing import Any
 
 import requests
 
-from config.sms import get_hero_sms_settings
+from core.provider_settings import resolve_sms_provider_settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +31,18 @@ class HeroSMSConfigError(HeroSMSError):
 
 class HeroSMSClient:
     def __init__(self, settings: dict[str, Any] | None = None, timeout: int = 30):
-        merged = get_hero_sms_settings(settings)
+        merged = resolve_sms_provider_settings((settings or {}).get("provider"), settings)
         self.provider = merged.get("provider") or "hero_sms"
         self.api_key = (merged.get("api_key") or "").strip()
         self.base_url = (merged.get("base_url") or "").strip()
         self.timeout = timeout
         self.session = requests.Session()
+        self.provider_label = self.provider or "sms_provider"
 
         if not self.api_key:
-            raise HeroSMSConfigError("未配置 HERO_SMS_API_KEY，无法调用 HeroSMS")
+            raise HeroSMSConfigError(f"未配置 {self.provider_label} 的 API key，无法调用短信平台")
         if not self.base_url:
-            raise HeroSMSConfigError("未配置 HERO_SMS_BASE_URL，无法调用 HeroSMS")
+            raise HeroSMSConfigError(f"未配置 {self.provider_label} 的 base_url，无法调用短信平台")
 
     def _request(self, action: str, params: dict[str, Any] | None = None, prefer_json: bool = False) -> dict[str, Any]:
         query = {
@@ -79,6 +80,78 @@ class HeroSMSClient:
             return self._normalize_json_response(action, data, raw_text)
 
         return self._normalize_text_response(action, raw_text)
+
+    @staticmethod
+    def _extract_payload(normalized: dict[str, Any]) -> Any:
+        data = normalized.get("data")
+        if isinstance(data, (list, dict)):
+            return data
+
+        meta_keys = {"action", "raw", "status", "success", "activation_id", "phone_number", "code", "detail"}
+        payload = {k: v for k, v in normalized.items() if k not in meta_keys}
+        return payload
+
+    @staticmethod
+    def _coerce_rows(payload: Any, *, key_name: str = "id", name_key: str = "name") -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+
+        if not isinstance(payload, dict):
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                row = dict(value)
+                row.setdefault(key_name, str(row.get(key_name) or key))
+                row.setdefault(name_key, row.get("eng") or row.get("name") or row.get("title") or str(key))
+                rows.append(row)
+            elif isinstance(value, str):
+                rows.append({key_name: str(key), name_key: value})
+        return rows
+
+    @staticmethod
+    def _parse_top_countries_rows(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            rows = [dict(row) for row in payload if isinstance(row, dict)]
+        elif isinstance(payload, dict):
+            rows = []
+            for key, value in payload.items():
+                if isinstance(value, dict):
+                    row = dict(value)
+                    row.setdefault("country", str(row.get("country") or row.get("id") or key))
+                    rows.append(row)
+        else:
+            rows = []
+
+        normalized_rows: list[dict[str, Any]] = []
+        for row in rows:
+            country = str(row.get("country") or row.get("id") or "").strip()
+            if not country:
+                continue
+            price = row.get("price")
+            count = row.get("count") or row.get("qty") or row.get("available")
+            try:
+                price = float(price) if price not in (None, "") else None
+            except (TypeError, ValueError):
+                price = None
+            try:
+                count = int(count) if count not in (None, "") else 0
+            except (TypeError, ValueError):
+                count = 0
+
+            normalized_rows.append(
+                {
+                    "country": country,
+                    "name": row.get("name") or row.get("eng") or row.get("title") or country,
+                    "price": price,
+                    "count": count,
+                    "raw": row,
+                }
+            )
+
+        normalized_rows.sort(key=lambda item: (item.get("price") if item.get("price") is not None else 999999, -(item.get("count") or 0)))
+        return normalized_rows
 
     def _normalize_json_response(self, action: str, data: Any, raw_text: str) -> dict[str, Any]:
         if isinstance(data, list):
@@ -178,6 +251,88 @@ class HeroSMSClient:
 
     def get_balance(self) -> dict[str, Any]:
         return self._request("getBalance")
+
+    def get_countries(self) -> list[dict[str, Any]]:
+        data = self._request("getCountries", prefer_json=True)
+        return self._coerce_rows(self._extract_payload(data), key_name="id", name_key="name")
+
+    def get_services(self, *, country: str | None = None, lang: str = "cn") -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"lang": lang}
+        if country not in (None, ""):
+            params["country"] = country
+        data = self._request("getServicesList", params=params, prefer_json=True)
+        return self._coerce_rows(self._extract_payload(data), key_name="code", name_key="name")
+
+    def get_prices(self, *, service: str | None = None, country: str | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if service not in (None, ""):
+            params["service"] = service
+        if country not in (None, ""):
+            params["country"] = country
+        data = self._request("getPrices", params=params, prefer_json=True)
+        payload = self._extract_payload(data)
+        return payload if isinstance(payload, dict) else {}
+
+    def get_top_countries(self, *, service: str | None = None) -> list[dict[str, Any]]:
+        for action in ("getTopCountriesByServiceRank", "getTopCountriesByService"):
+            try:
+                data = self._request(action, params={"service": service} if service else None, prefer_json=True)
+                rows = self._parse_top_countries_rows(self._extract_payload(data))
+                if rows:
+                    return rows
+            except Exception:
+                logger.debug("%s 查询失败，继续尝试下一个接口", action, exc_info=True)
+
+        prices = self.get_prices(service=service)
+        rows: list[dict[str, Any]] = []
+        for country_id, services in prices.items():
+            if not isinstance(services, dict):
+                continue
+            svc_data = services.get(service) if service else next((v for v in services.values() if isinstance(v, dict)), None)
+            if not isinstance(svc_data, dict):
+                continue
+
+            price = svc_data.get("cost") or svc_data.get("price")
+            count = svc_data.get("count") or svc_data.get("qty") or svc_data.get("available")
+            try:
+                price = float(price) if price not in (None, "") else None
+            except (TypeError, ValueError):
+                price = None
+            try:
+                count = int(count) if count not in (None, "") else 0
+            except (TypeError, ValueError):
+                count = 0
+            if price is None and count <= 0:
+                continue
+            rows.append({"country": str(country_id), "name": str(country_id), "price": price, "count": count, "raw": svc_data})
+
+        rows.sort(key=lambda item: (item.get("price") if item.get("price") is not None else 999999, -(item.get("count") or 0)))
+        return rows
+
+    def get_best_country(self, *, service: str | None = None, min_stock: int = 20, max_price: float = 0) -> dict[str, Any] | None:
+        rows = self.get_top_countries(service=service)
+        if not rows:
+            return None
+
+        for row in rows:
+            price = row.get("price") or 0
+            count = row.get("count") or 0
+            if count < min_stock:
+                continue
+            if max_price > 0 and price > max_price:
+                continue
+            return row
+
+        for row in rows:
+            price = row.get("price") or 0
+            count = row.get("count") or 0
+            if count <= 0:
+                continue
+            if max_price > 0 and price > max_price:
+                continue
+            return row
+
+        return None
 
     def get_number(
         self,

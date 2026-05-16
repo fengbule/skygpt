@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import secrets
+from typing import Any
 from urllib.parse import urlencode, urljoin, urlparse, parse_qs
 
 from core.session import BrowserSession
@@ -107,6 +108,106 @@ def _extract_workspace_id(session: BrowserSession) -> str | None:
             if isinstance(workspaces, dict) and workspaces.get("id"):
                 return workspaces["id"]
     return None
+
+
+def _normalize_url(target_url: str, base_url: str) -> str:
+    value = (target_url or "").strip()
+    if not value:
+        return ""
+    if value.startswith(("http://", "https://")):
+        return value
+    return urljoin(base_url, value)
+
+
+def _decode_oauth_session_cookie(cookie_value: str | None) -> dict:
+    raw = str(cookie_value or "").strip()
+    if not raw:
+        return {}
+    first = raw.split(".")[0]
+    for decoder in (base64.urlsafe_b64decode, base64.b64decode):
+        try:
+            pad = "=" * ((4 - (len(first) % 4)) % 4)
+            decoded = decoder((first + pad).encode("ascii")).decode("utf-8")
+            parsed = json.loads(decoded)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+    return {}
+
+
+def _extract_workspace_meta_from_cookies(session: BrowserSession) -> dict:
+    cookie_candidates = [
+        session.session.cookies.get("oai-client-auth-session"),
+        session.session.cookies.get("oai-client-auth_session"),
+    ]
+    for cookie_value in cookie_candidates:
+        parsed = _decode_oauth_session_cookie(cookie_value)
+        if parsed:
+            return parsed
+    return {}
+
+
+def _extract_workspace_from_consent_html(session: BrowserSession, consent_url: str) -> dict:
+    try:
+        resp = session.get(
+            consent_url,
+            headers=session.get_auth_navigate_headers(referer="https://chatgpt.com/"),
+            allow_redirects=True,
+        )
+        html = resp.text or ""
+        if "workspaces" not in html:
+            return {}
+        ids = re.findall(r'"id"(?:,|:)"([0-9a-f-]{36})"', html, flags=re.I)
+        kinds = re.findall(r'"kind"(?:,|:)"([^"]+)"', html, flags=re.I)
+        if not ids:
+            return {}
+        seen: set[str] = set()
+        workspaces: list[dict] = []
+        for idx, workspace_id in enumerate(ids):
+            if workspace_id in seen:
+                continue
+            seen.add(workspace_id)
+            item = {"id": workspace_id}
+            if idx < len(kinds):
+                item["kind"] = kinds[idx]
+            workspaces.append(item)
+        return {"workspaces": workspaces} if workspaces else {}
+    except Exception:
+        logger.debug("[CodexOAuth] 从 consent HTML 提取 workspace 失败", exc_info=True)
+        return {}
+
+
+def _extract_code_from_url(url: str) -> str:
+    if not url or "code=" not in url:
+        return ""
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    return str((qs.get("code") or [""])[0] or "").strip()
+
+
+def _follow_redirects_for_code(session: BrowserSession, start_url: str, *, max_redirects: int = 12) -> str:
+    current_url = start_url
+    headers = session.get_auth_navigate_headers(referer="https://chatgpt.com/")
+    for step in range(1, max_redirects + 1):
+        resp = session.get(current_url, headers=headers, allow_redirects=False)
+        location = str(resp.headers.get("Location") or "").strip()
+        logger.info(
+            "[CodexOAuth] redirect-follow step=%s status=%s url=%s location=%s",
+            step,
+            resp.status_code,
+            resp.url or current_url,
+            location,
+        )
+        if not location:
+            break
+        next_url = urljoin(current_url, location)
+        if _extract_code_from_url(next_url):
+            return next_url
+        if resp.status_code not in (301, 302, 303, 307, 308):
+            break
+        current_url = next_url
+    return ""
 
 
 def _extract_account_id(access_token: str, id_token: str, session_info: dict | None = None) -> str:
@@ -355,13 +456,23 @@ def acquire_codex_tokens(session: BrowserSession, session_info: dict | None = No
                 continue
 
         if "sign-in-with-chatgpt/codex/consent" in (resp.url or current_url):
-            ws_id = _extract_workspace_id(session)
-            if not ws_id:
+            consent_url = resp.url or current_url
+            session_meta = _extract_workspace_meta_from_cookies(session)
+            workspaces = list(session_meta.get("workspaces") or [])
+            if not workspaces:
+                session_meta = _extract_workspace_from_consent_html(session, consent_url)
+                workspaces = list(session_meta.get("workspaces") or [])
+            if not workspaces:
                 raise RuntimeError("Codex consent 阶段未能提取 workspace_id")
+
+            ws_id = str((workspaces[0] or {}).get("id") or "").strip()
+            if not ws_id:
+                raise RuntimeError("Codex consent 阶段 workspace_id 为空")
+
             logger.info(f"[CodexOAuth] 选择 workspace: {ws_id}")
             select_resp = session.post(
                 "https://auth.openai.com/api/accounts/workspace/select",
-                headers=session.get_auth_headers(referer=resp.url or current_url),
+                headers=session.get_auth_headers(referer=consent_url),
                 data=json.dumps({"workspace_id": ws_id}),
                 allow_redirects=False,
             )
@@ -372,16 +483,87 @@ def acquire_codex_tokens(session: BrowserSession, session_info: dict | None = No
                 select_resp.headers.get("Content-Type", ""),
                 select_resp.text[:300],
             )
-            select_location = select_resp.headers.get("Location")
-            if select_location:
-                current_url = urljoin(current_url, select_location)
-                continue
-            if "application/json" in select_resp.headers.get("Content-Type", ""):
-                select_data = select_resp.json()
-                if select_data.get("continue_url"):
-                    current_url = urljoin(current_url, select_data["continue_url"])
-                    continue
-            raise RuntimeError(f"workspace/select 未返回可继续 URL: {select_resp.text[:200]}")
+
+            next_url = _normalize_url(str(select_resp.headers.get("Location") or ""), consent_url)
+            next_data: dict[str, Any] = {}
+            if not next_url and "application/json" in select_resp.headers.get("Content-Type", ""):
+                try:
+                    next_data = select_resp.json() or {}
+                except Exception:
+                    next_data = {}
+                next_url = _normalize_url(str(next_data.get("continue_url") or ""), consent_url)
+
+            orgs = list((((next_data.get("data") or {}).get("orgs")) or []))
+            if orgs and orgs[0].get("id"):
+                org_id = str(orgs[0].get("id") or "").strip()
+                org_body: dict[str, str] = {"org_id": org_id}
+                projects = list(orgs[0].get("projects") or [])
+                if projects and projects[0].get("id"):
+                    org_body["project_id"] = str(projects[0].get("id") or "").strip()
+
+                logger.info(f"[CodexOAuth] 选择 organization: {org_id}")
+                org_resp = session.post(
+                    "https://auth.openai.com/api/accounts/organization/select",
+                    headers=session.get_auth_headers(referer=consent_url),
+                    data=json.dumps(org_body),
+                    allow_redirects=False,
+                )
+                logger.info(
+                    "[CodexOAuth] organization/select status=%s location=%s content_type=%s body=%s",
+                    org_resp.status_code,
+                    org_resp.headers.get("Location", ""),
+                    org_resp.headers.get("Content-Type", ""),
+                    org_resp.text[:300],
+                )
+
+                org_location = _normalize_url(str(org_resp.headers.get("Location") or ""), consent_url)
+                if org_location:
+                    next_url = org_location
+                elif "application/json" in org_resp.headers.get("Content-Type", ""):
+                    try:
+                        org_data = org_resp.json() or {}
+                    except Exception:
+                        org_data = {}
+                    next_url = _normalize_url(str(org_data.get("continue_url") or ""), consent_url)
+
+            if not next_url and next_data:
+                next_url = _normalize_url(str(next_data.get("continue_url") or ""), consent_url)
+
+            if not next_url:
+                next_url = "https://auth.openai.com/api/oauth/oauth2/auth?" + request_data["authorization_url"].split("?", 1)[1]
+
+            callback_url = _follow_redirects_for_code(session, next_url)
+            if callback_url:
+                parsed = urlparse(callback_url)
+                qs = parse_qs(parsed.query)
+                code = qs.get("code", [""])[0]
+                got_state = qs.get("state", [""])[0]
+                if not code:
+                    raise RuntimeError(f"Codex 回调 URL 缺少 code: {callback_url}")
+                if got_state != state:
+                    raise RuntimeError("Codex OAuth state 校验失败")
+                token_resp = _exchange_code_for_tokens(code, verifier)
+                access_token = (token_resp.get("access_token") or "").strip()
+                refresh_token = (token_resp.get("refresh_token") or "").strip()
+                id_token = (token_resp.get("id_token") or "").strip()
+                is_valid, reason = validate_codex_token_set({
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "id_token": id_token,
+                })
+                if not is_valid:
+                    raise RuntimeError(f"Codex token 交换结果无效: {reason}")
+                account_id = _extract_account_id(access_token, id_token, session_info=session_info)
+                logger.info("[CodexOAuth] workspace/org 自动选择后已成功换取 Codex OAuth 凭据")
+                return {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "id_token": id_token,
+                    "account_id": account_id,
+                }
+
+            current_url = next_url
+            continue
 
         raise RuntimeError(
             f"Codex OAuth 授权链路中断: status={resp.status_code}, url={resp.url or current_url}"

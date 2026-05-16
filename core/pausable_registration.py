@@ -259,16 +259,17 @@ class PausableRegistration:
             return
 
         settings = self._build_sms_settings(task_data)
+        provider_name = task_data.get("sms_provider") or "hero_sms"
         phone_country = task_data.get("phone_country")
         sms_service_code = task_data.get("sms_service_code")
         sms_operator = task_data.get("sms_operator")
 
         self._add_log(
             task_id,
-            f"开始手机号接码框架：provider={task_data.get('sms_provider')}, country={phone_country}, service={sms_service_code}",
+            f"开始手机号接码框架：provider={provider_name}, country={phone_country}, service={sms_service_code}",
         )
 
-        self._update_step(task_id, 1, "running", "正在初始化 HeroSMS 提供者...")
+        self._update_step(task_id, 1, "running", f"正在初始化短信提供者 {provider_name}...")
         self._update_step(task_id, 1, "completed", "短信提供者初始化完成")
 
         self._update_step(task_id, 2, "running", "正在申请手机号...")
@@ -290,7 +291,10 @@ class PausableRegistration:
             sms_provider=task_data.get("sms_provider"),
         )
         self._update_step(task_id, 2, "completed", f"已获取号码 {task_data['phone_number']}")
-        self._add_log(task_id, f"HeroSMS 激活成功：activation_id={task_data['sms_activation_id']}, phone={task_data['phone_number']}")
+        self._add_log(
+            task_id,
+            f"{provider_name} 激活成功：activation_id={task_data['sms_activation_id']}, phone={task_data['phone_number']}",
+        )
 
         for step_id in (3, 4, 5, 6, 7):
             task_data["step_status"][step_id] = "completed"
@@ -302,7 +306,7 @@ class PausableRegistration:
             "activation_id": task_data.get("sms_activation_id"),
             "service": sms_service_code,
             "country": phone_country,
-            "note": "当前阶段仅轮询 HeroSMS 短信验证码，不会提交到 OpenAI 手机验证接口。",
+            "note": "当前阶段仅轮询短信验证码，不会提交到 OpenAI 手机验证接口。",
         }
 
         self._update_step(task_id, 8, "running", "正在轮询短信验证码（仅框架，不提交 OpenAI）...")
@@ -316,7 +320,7 @@ class PausableRegistration:
         task_data["sms_last_status"] = code_result.get("status")
         task_data["sms_code"] = code_result.get("code")
         self._update_step(task_id, 8, "completed", f"已收到验证码 {task_data['sms_code']}")
-        self._add_log(task_id, f"HeroSMS 收到验证码：{task_data['sms_code']}", "SUCCESS")
+        self._add_log(task_id, f"{provider_name} 收到验证码：{task_data['sms_code']}", "SUCCESS")
 
         for step_id in (9, 10, 11):
             task_data["step_status"][step_id] = "completed"

@@ -10,6 +10,7 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify
 from web.database import TaskDB
 from core.pausable_registration import RegistrationManager
+from core.provider_settings import get_default_sms_provider
 
 logger = logging.getLogger(__name__)
 task_bp = Blueprint("tasks", __name__, url_prefix="/api/tasks")
@@ -97,7 +98,7 @@ def create_task():
         phone_country = data.get("phone_country")
         sms_service_code = data.get("sms_service_code")
         sms_operator = data.get("sms_operator")
-        sms_provider = data.get("sms_provider") or "hero_sms"
+        sms_provider = data.get("sms_provider") or get_default_sms_provider()
         sms_api_key = data.get("sms_api_key")
         sms_base_url = data.get("sms_base_url")
         sms_poll_interval = data.get("sms_poll_interval")

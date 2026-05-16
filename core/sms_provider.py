@@ -16,8 +16,8 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from config.sms import get_sms_provider_settings
 from core.hero_sms_client import HeroSMSClient
+from core.provider_settings import get_default_sms_provider, resolve_sms_provider_settings
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +64,26 @@ class SMSActivateCompatibleProvider:
 
     def __init__(self, settings: dict[str, Any] | None = None, provider_name: str = "hero_sms"):
         self.provider_name = provider_name
-        self.settings = get_sms_provider_settings(provider_name, settings)
+        self.settings = resolve_sms_provider_settings(provider_name, settings)
         self.client = HeroSMSClient(self.settings)
 
     def get_balance(self) -> dict[str, Any]:
         return self.client.get_balance()
+
+    def get_countries(self) -> list[dict[str, Any]]:
+        return self.client.get_countries()
+
+    def get_services(self, *, country: str | None = None, lang: str = "cn") -> list[dict[str, Any]]:
+        return self.client.get_services(country=country, lang=lang)
+
+    def get_prices(self, *, service: str | None = None, country: str | None = None) -> dict[str, Any]:
+        return self.client.get_prices(service=service, country=country)
+
+    def get_top_countries(self, *, service: str | None = None) -> list[dict[str, Any]]:
+        return self.client.get_top_countries(service=service)
+
+    def get_best_country(self, *, service: str | None = None, min_stock: int = 20, max_price: float = 0) -> dict[str, Any] | None:
+        return self.client.get_best_country(service=service, min_stock=min_stock, max_price=max_price)
 
     def acquire_phone_number(
         self,
@@ -81,10 +96,23 @@ class SMSActivateCompatibleProvider:
         activation_type: str | None = None,
         order_id: str | None = None,
     ) -> SMSActivation:
-        country = str(country or self.settings.get("default_country") or "0")
+        explicit_country = country not in (None, "")
+        auto_select_best = bool(self.settings.get("auto_select_best_country"))
+        country = country or self.settings.get("default_country") or "0"
         service = (service or self.settings.get("default_service") or "").strip()
         operator = operator or self.settings.get("operator") or None
         max_price = self.settings.get("max_price") if max_price is None else max_price
+
+        if auto_select_best and not explicit_country:
+            best_country = self.get_best_country(
+                service=service,
+                min_stock=int(self.settings.get("best_country_min_stock") or 20),
+                max_price=float(self.settings.get("best_country_max_price") or 0),
+            )
+            if best_country and best_country.get("country"):
+                country = str(best_country["country"])
+
+        country = str(country or "0")
 
         if not service:
             raise SMSProviderError("未配置短信服务代码 sms_service_code / default_service")
@@ -197,9 +225,24 @@ class ApiCCProvider:
     provider_name = "api_cc"
 
     def __init__(self, settings: dict[str, Any] | None = None):
-        self.settings = get_sms_provider_settings(self.provider_name, settings)
+        self.settings = resolve_sms_provider_settings(self.provider_name, settings)
 
     def get_balance(self) -> dict[str, Any]:
+        raise SMSProviderError("api.cc provider 已预留，但当前仍缺少稳定 API 文档/样本，暂未实现")
+
+    def get_countries(self) -> list[dict[str, Any]]:
+        raise SMSProviderError("api.cc provider 已预留，但当前仍缺少稳定 API 文档/样本，暂未实现")
+
+    def get_services(self, *, country: str | None = None, lang: str = "cn") -> list[dict[str, Any]]:
+        raise SMSProviderError("api.cc provider 已预留，但当前仍缺少稳定 API 文档/样本，暂未实现")
+
+    def get_prices(self, *, service: str | None = None, country: str | None = None) -> dict[str, Any]:
+        raise SMSProviderError("api.cc provider 已预留，但当前仍缺少稳定 API 文档/样本，暂未实现")
+
+    def get_top_countries(self, *, service: str | None = None) -> list[dict[str, Any]]:
+        raise SMSProviderError("api.cc provider 已预留，但当前仍缺少稳定 API 文档/样本，暂未实现")
+
+    def get_best_country(self, *, service: str | None = None, min_stock: int = 20, max_price: float = 0) -> dict[str, Any] | None:
         raise SMSProviderError("api.cc provider 已预留，但当前仍缺少稳定 API 文档/样本，暂未实现")
 
     def acquire_phone_number(self, **kwargs) -> SMSActivation:
@@ -225,7 +268,7 @@ SMS_PROVIDER_REGISTRY = {
 def get_sms_provider(provider: str | None = None, settings: dict[str, Any] | None = None):
     provider_name = (provider or (settings or {}).get("provider") or "").strip().lower()
     if not provider_name:
-        provider_name = get_sms_provider_settings(provider, settings).get("provider") or "hero_sms"
+        provider_name = get_default_sms_provider()
     provider_cls = SMS_PROVIDER_REGISTRY.get(provider_name)
     if not provider_cls:
         raise SMSProviderError(f"暂不支持短信平台: {provider_name}")
@@ -234,6 +277,50 @@ def get_sms_provider(provider: str | None = None, settings: dict[str, Any] | Non
 
 def get_balance(provider: str | None = None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     return get_sms_provider(provider, settings).get_balance()
+
+
+def get_countries(provider: str | None = None, settings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    return get_sms_provider(provider, settings).get_countries()
+
+
+def get_services(
+    provider: str | None = None,
+    settings: dict[str, Any] | None = None,
+    *,
+    country: str | None = None,
+    lang: str = "cn",
+) -> list[dict[str, Any]]:
+    return get_sms_provider(provider, settings).get_services(country=country, lang=lang)
+
+
+def get_prices(
+    provider: str | None = None,
+    settings: dict[str, Any] | None = None,
+    *,
+    service: str | None = None,
+    country: str | None = None,
+) -> dict[str, Any]:
+    return get_sms_provider(provider, settings).get_prices(service=service, country=country)
+
+
+def get_top_countries(
+    provider: str | None = None,
+    settings: dict[str, Any] | None = None,
+    *,
+    service: str | None = None,
+) -> list[dict[str, Any]]:
+    return get_sms_provider(provider, settings).get_top_countries(service=service)
+
+
+def get_best_country(
+    provider: str | None = None,
+    settings: dict[str, Any] | None = None,
+    *,
+    service: str | None = None,
+    min_stock: int = 20,
+    max_price: float = 0,
+) -> dict[str, Any] | None:
+    return get_sms_provider(provider, settings).get_best_country(service=service, min_stock=min_stock, max_price=max_price)
 
 
 def acquire_phone_number(provider: str | None = None, settings: dict[str, Any] | None = None, **kwargs) -> dict[str, Any]:

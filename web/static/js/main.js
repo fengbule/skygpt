@@ -10,30 +10,80 @@ document.addEventListener('DOMContentLoaded', function() {
     const proxyTestResult = document.getElementById('proxyTestResult');
     const taskResult = document.getElementById('taskResult');
 
+    async function loadSavedSmsDefaults() {
+        try {
+            const response = await fetch('/api/settings/sms/default');
+            const data = await response.json();
+            if (!data.success || !data.item) {
+                return;
+            }
+            const item = data.item;
+            const config = item.config || {};
+            const smsProviderSelect = document.getElementById('smsProvider');
+            if (smsProviderSelect && item.provider) {
+                smsProviderSelect.value = item.provider;
+            }
+            const mapping = {
+                phoneCountry: config.default_country,
+                smsServiceCode: config.default_service,
+                smsOperator: config.operator,
+                smsBaseUrl: config.base_url,
+                smsPollInterval: config.poll_interval,
+                smsMaxWait: config.max_wait,
+                smsMaxPrice: config.max_price,
+            };
+            Object.entries(mapping).forEach(([id, value]) => {
+                const el = document.getElementById(id);
+                if (el && !el.value && value !== null && value !== undefined && value !== '') {
+                    el.value = value;
+                }
+            });
+        } catch (error) {
+            console.warn('加载已保存短信设置失败:', error);
+        }
+    }
+
     function syncRegistrationMode() {
+        if (!registrationModeSelect) {
+            return;
+        }
         const mode = registrationModeSelect.value;
         const emailInput = document.getElementById('email');
         const emailLabel = document.querySelector('label[for="email"]');
         const isPhone = mode === 'phone';
 
-        phoneModeSection.style.display = isPhone ? 'block' : 'none';
-        emailInput.required = !isPhone;
-        emailInput.placeholder = isPhone ? '手机号模式可留空' : 'your.email@example.com';
+        if (phoneModeSection) {
+            phoneModeSection.style.display = isPhone ? 'block' : 'none';
+        }
+        if (emailInput) {
+            emailInput.required = !isPhone;
+            emailInput.placeholder = isPhone ? '手机号模式可留空' : 'your.email@example.com';
+        }
         if (emailLabel) {
             emailLabel.textContent = isPhone ? '邮箱地址（可选，占位/后续补绑）' : '邮箱地址 *';
         }
     }
 
-    registrationModeSelect.addEventListener('change', syncRegistrationMode);
+    if (registrationModeSelect) {
+        registrationModeSelect.addEventListener('change', syncRegistrationMode);
+    }
     syncRegistrationMode();
+    loadSavedSmsDefaults();
 
-    proxySourceSelect.addEventListener('change', function() {
-        const value = this.value;
-        proxyManualSection.style.display = value === 'manual' ? 'block' : 'none';
-        proxySubscriptionSection.style.display = value === 'subscription' ? 'block' : 'none';
-    });
+    if (proxySourceSelect) {
+        proxySourceSelect.addEventListener('change', function() {
+            const value = this.value;
+            if (proxyManualSection) {
+                proxyManualSection.style.display = value === 'manual' ? 'block' : 'none';
+            }
+            if (proxySubscriptionSection) {
+                proxySubscriptionSection.style.display = value === 'subscription' ? 'block' : 'none';
+            }
+        });
+    }
 
-    testProxyBtn.addEventListener('click', async function() {
+    if (testProxyBtn) {
+        testProxyBtn.addEventListener('click', async function() {
         const proxyUrl = document.getElementById('proxyManual').value;
         if (!proxyUrl) {
             proxyTestResult.innerHTML = '<div class="error">请输入代理地址</div>';
@@ -59,12 +109,14 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (error) {
             proxyTestResult.innerHTML = `<div class="test-result error">测试失败: ${error.message}</div>`;
         }
-    });
+        });
+    }
 
-    registrationForm.addEventListener('submit', async function(e) {
+    if (registrationForm) {
+        registrationForm.addEventListener('submit', async function(e) {
         e.preventDefault();
 
-        const registrationMode = registrationModeSelect.value;
+        const registrationMode = registrationModeSelect?.value || 'email';
         const email = document.getElementById('email').value;
         const name = document.getElementById('name').value;
         const birthday = document.getElementById('birthday').value;
@@ -74,13 +126,14 @@ document.addEventListener('DOMContentLoaded', function() {
         const smsProvider = document.getElementById('smsProvider')?.value || 'hero_sms';
         const smsApiKey = document.getElementById('smsApiKey')?.value || '';
         const smsBaseUrl = document.getElementById('smsBaseUrl')?.value || '';
+        const smsPollIntervalRaw = document.getElementById('smsPollInterval')?.value || '';
+        const smsMaxWaitRaw = document.getElementById('smsMaxWait')?.value || '';
+        const smsMaxPriceRaw = document.getElementById('smsMaxPrice')?.value || '';
+        const smsPollInterval = smsPollIntervalRaw ? parseInt(smsPollIntervalRaw, 10) : null;
+        const smsMaxWait = smsMaxWaitRaw ? parseInt(smsMaxWaitRaw, 10) : null;
+        const smsMaxPrice = smsMaxPriceRaw ? parseFloat(smsMaxPriceRaw) : null;
         const proxySource = proxySourceSelect.value;
         let proxy = null;
-
-        if (registrationMode === 'phone' && !smsServiceCode) {
-            taskResult.innerHTML = '<div class="test-result error">手机号模式必须填写短信服务代码</div>';
-            return;
-        }
 
         if (proxySource === 'manual') {
             proxy = document.getElementById('proxyManual').value;
@@ -104,6 +157,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     sms_provider: smsProvider,
                     sms_api_key: smsApiKey,
                     sms_base_url: smsBaseUrl,
+                    sms_poll_interval: Number.isFinite(smsPollInterval) ? smsPollInterval : null,
+                    sms_max_wait: Number.isFinite(smsMaxWait) ? smsMaxWait : null,
+                    sms_max_price: Number.isFinite(smsMaxPrice) ? smsMaxPrice : null,
                 })
             });
 
@@ -119,7 +175,8 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (error) {
             taskResult.innerHTML = `<div class="test-result error">请求失败: ${error.message}</div>`;
         }
-    });
+        });
+    }
 
     const importSubscriptionBtn = document.getElementById('importSubscriptionBtn');
     if (importSubscriptionBtn) {
