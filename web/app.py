@@ -39,7 +39,17 @@ app.register_blueprint(task_bp)
 app.register_blueprint(proxy_bp)
 app.register_blueprint(cpa_bp)
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+def _select_socketio_mode() -> str:
+    try:
+        import gevent  # noqa: F401
+        import geventwebsocket  # noqa: F401
+        return "gevent"
+    except Exception:
+        return "threading"
+
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode=_select_socketio_mode())
 
 reg_manager = RegistrationManager.get_instance()
 reg_manager.set_socketio(socketio)

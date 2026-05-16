@@ -39,6 +39,25 @@ docker-compose up -d
 
 > 说明：项目使用包导入，启动 Web 服务时应使用 `python -m web.app`，不要直接执行 `python web/app.py`。
 
+### 方式四：Gunicorn + Nginx + systemd（推荐长期运行）
+
+适用于 Linux 服务器长期运行：
+
+1. 创建虚拟环境并安装依赖
+2. 将 `deploy/skygpt.service` 安装到 `/etc/systemd/system/skygpt.service`
+3. 将 `deploy/nginx-skygpt.conf` 安装到 `/etc/nginx/sites-available/skygpt`
+4. 建立软链接到 `/etc/nginx/sites-enabled/skygpt`
+5. 启动并设置开机自启：
+
+```bash
+systemctl daemon-reload
+systemctl enable --now skygpt
+nginx -t
+systemctl restart nginx
+```
+
+Gunicorn 默认监听 `127.0.0.1:8000`，由 Nginx 对外提供 80 端口访问，并转发 WebSocket。
+
 ## 使用说明
 
 1. 打开 WebUI，输入邮箱地址

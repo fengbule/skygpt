@@ -1,0 +1,10 @@
+bind = "127.0.0.1:8000"
+workers = 1
+worker_class = "geventwebsocket.gunicorn.workers.GeventWebSocketWorker"
+timeout = 120
+graceful_timeout = 30
+keepalive = 10
+accesslog = "-"
+errorlog = "-"
+capture_output = True
+loglevel = "info"
