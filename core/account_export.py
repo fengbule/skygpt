@@ -11,6 +11,7 @@
 import json
 import logging
 import time
+import base64
 from datetime import datetime
 from pathlib import Path
 import threading
@@ -26,6 +27,39 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ACCOUNTS_DIR = _PROJECT_ROOT / "accounts"
 _BATCH_ARCHIVE_LOCK = threading.RLock()
+
+
+def decode_jwt_payload(token: str) -> dict:
+    if not token or token.count(".") < 2:
+        return {}
+    payload = token.split(".")[1]
+    payload += "=" * ((4 - len(payload) % 4) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def extract_account_id_from_tokens(
+    access_token: str | None,
+    id_token: str | None = None,
+    session_info: dict | None = None,
+) -> str:
+    if session_info:
+        account = session_info.get("account") or {}
+        if account.get("id"):
+            return str(account["id"])
+
+    for token in (id_token or "", access_token or ""):
+        payload = decode_jwt_payload(token)
+        auth = payload.get("https://api.openai.com/auth") or {}
+        if auth.get("chatgpt_account_id"):
+            return str(auth["chatgpt_account_id"])
+        orgs = auth.get("organizations") or []
+        if isinstance(orgs, list) and orgs and isinstance(orgs[0], dict) and orgs[0].get("id"):
+            return str(orgs[0]["id"])
+
+    return ""
 
 
 def _account_material_line(email: str, row: dict | None = None) -> str:
@@ -389,10 +423,22 @@ def save_account_data(
     extra = extra or {}
     user = extra.get("user") or {}
     account = extra.get("account") or {}
+    codex_tokens = extra.get("codex_tokens") or {}
+    codex_access_token = codex_tokens.get("access_token") or access_token
+    codex_refresh_token = codex_tokens.get("refresh_token") or extra.get("refresh_token")
+    codex_id_token = codex_tokens.get("id_token") or extra.get("id_token")
+    codex_account_id = extra.get("account_id") or extract_account_id_from_tokens(
+        codex_access_token,
+        codex_id_token,
+        session_info=extra,
+    )
 
     row_id = insert_account(
         email=email,
-        access_token=access_token,
+        access_token=codex_access_token,
+        refresh_token=codex_refresh_token,
+        id_token=codex_id_token,
+        account_id=codex_account_id,
         totp_secret=totp_secret,
         user_id=user.get("id"),
         user_name=user.get("name"),
@@ -406,7 +452,7 @@ def save_account_data(
     batch_folder = _append_batch_archive(
         row_id=row_id,
         email=email,
-        access_token=access_token,
+        access_token=codex_access_token,
         totp_secret=totp_secret,
         email_source=email_source,
         proxy_used=proxy_used,

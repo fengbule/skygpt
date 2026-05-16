@@ -29,9 +29,12 @@ from config.browser import (
 # ---------- OpenAI 协议 ----------
 from config.openai_protocol import (
     OPENAI_CLIENT_ID,
+    CODEX_CLIENT_ID,
     OPENAI_SCOPE,
+    CODEX_SCOPE,
     OPENAI_AUDIENCE,
     OPENAI_REDIRECT_URI,
+    CODEX_REDIRECT_URI,
     SENTINEL_SV,
 )
 
@@ -70,7 +73,9 @@ __all__ = [
     "USER_AGENT", "SEC_CH_UA", "SEC_CH_UA_PLATFORM", "SEC_CH_UA_MOBILE",
     "IMPERSONATE", "REQUEST_TIMEOUT",
     # openai_protocol
-    "OPENAI_CLIENT_ID", "OPENAI_SCOPE", "OPENAI_AUDIENCE", "OPENAI_REDIRECT_URI",
+    "OPENAI_CLIENT_ID", "CODEX_CLIENT_ID",
+    "OPENAI_SCOPE", "CODEX_SCOPE",
+    "OPENAI_AUDIENCE", "OPENAI_REDIRECT_URI", "CODEX_REDIRECT_URI",
     "SENTINEL_SV",
     # proxy
     "PROXY_POOL", "pick_proxy", "PROXY",

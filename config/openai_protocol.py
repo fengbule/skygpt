@@ -10,6 +10,9 @@ SENTINEL_SV 是 sdk.js 的版本号，会随 OpenAI 更新而变化，
 # OAuth 客户端 ID（固定）
 OPENAI_CLIENT_ID = "app_X8zY6vW2pQ9tR3dE7nK1jL5gH"
 
+# Codex CLI / WHAM OAuth 客户端 ID（用于生成可被 Codex 使用的 auth.json / CPA）
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
 # OAuth scopes
 OPENAI_SCOPE = (
     "openid email profile offline_access "
@@ -17,11 +20,17 @@ OPENAI_SCOPE = (
     "organization.read organization.write"
 )
 
+# Codex OAuth scopes（与 Codex CLI 保持一致）
+CODEX_SCOPE = "openid profile email offline_access"
+
 # OAuth audience
 OPENAI_AUDIENCE = "https://api.openai.com/v1"
 
 # OAuth 回调（chatgpt.com 端）
 OPENAI_REDIRECT_URI = "https://chatgpt.com/api/auth/callback/openai"
+
+# Codex CLI 固定回调地址
+CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
 # Sentinel SDK 版本号（影响 sentinel iframe URL 与 referer header）
 SENTINEL_SV = "20260219f9f6"

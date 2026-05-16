@@ -522,6 +522,9 @@ def insert_account(
     *,
     email: str,
     access_token: str,
+    refresh_token: str | None = None,
+    id_token: str | None = None,
+    account_id: str | None = None,
     totp_secret: str | None = None,
     user_id: str | None = None,
     user_name: str | None = None,
@@ -554,6 +557,9 @@ def insert_account(
 
         row.update({
             "access_token": access_token,
+            "refresh_token": refresh_token if refresh_token is not None else row.get("refresh_token"),
+            "id_token": id_token if id_token is not None else row.get("id_token"),
+            "account_id": account_id if account_id is not None else row.get("account_id"),
             "totp_secret": totp_secret if totp_secret is not None else row.get("totp_secret"),
             "user_id": user_id if user_id is not None else row.get("user_id"),
             "user_name": user_name if user_name is not None else row.get("user_name"),
@@ -569,7 +575,8 @@ def insert_account(
         if outlook_row:
             row["password"] = outlook_row.get("password")
             row["client_id"] = outlook_row.get("client_id")
-            row["refresh_token"] = outlook_row.get("refresh_token")
+            if not row.get("refresh_token"):
+                row["refresh_token"] = outlook_row.get("refresh_token")
             row["original_email_line"] = _outlook_line(outlook_row)
             outlook_row["status"] = "used"
             outlook_row["used_at"] = outlook_row.get("used_at") or _now()

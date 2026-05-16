@@ -30,7 +30,9 @@ from core.account_export import (
     setup_2fa,
     save_account_data,
     create_batch_archive_dir,
+    extract_account_id_from_tokens,
 )
+from core.codex_oauth import acquire_codex_tokens
 from core.email_provider import acquire_email, wait_for_otp
 
 # 配置日志
@@ -282,9 +284,17 @@ def run_registration(
 
         # ==================== 阶段8: 持久化账号 ====================
         from config import EMAIL_SOURCE
+        codex_tokens = acquire_codex_tokens(session, session_info=session_info)
+        codex_access_token = codex_tokens.get("access_token") or access_token
+        codex_account_id = extract_account_id_from_tokens(
+            codex_access_token,
+            codex_tokens.get("id_token"),
+            session_info=session_info,
+        )
+
         account_id = save_account_data(
             email=email,
-            access_token=access_token,
+            access_token=codex_access_token,
             totp_secret=totp_secret,
             email_source=EMAIL_SOURCE,
             proxy_used=session.proxy or None,
@@ -294,10 +304,14 @@ def run_registration(
                 "account": session_info.get("account"),
                 "expires": session_info.get("expires"),
                 "device_id": session.device_id,
+                "codex_tokens": codex_tokens,
+                "refresh_token": codex_tokens.get("refresh_token"),
+                "id_token": codex_tokens.get("id_token"),
+                "account_id": codex_account_id,
             },
         )
 
-        logger.info(f"[完成] {email}，账号ID={account_id}，Token={access_token[:16]}...")
+        logger.info(f"[完成] {email}，账号ID={codex_account_id or account_id}，Token={codex_access_token[:16]}...")
 
         # ==================== 阶段9: 后置自动触发 flow ====================
         # 只有走完回调、拿到 token 并保存成功的账号，才会触发 flow。
@@ -324,8 +338,11 @@ def run_registration(
 
         logger.debug(f"[完成] TOTP Secret: {totp_secret or '(未设置)'}")
 
-        return {"success": True, "email": email, "account_id": account_id,
-                "access_token": access_token, "totp_secret": totp_secret,
+        return {"success": True, "email": email, "account_id": codex_account_id or account_id,
+                "access_token": codex_access_token,
+                "refresh_token": codex_tokens.get("refresh_token", ""),
+                "id_token": codex_tokens.get("id_token", ""),
+                "totp_secret": totp_secret,
                 "flow": flow_result}
 
     except Exception as e:

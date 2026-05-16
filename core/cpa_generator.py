@@ -13,6 +13,29 @@ logger = logging.getLogger(__name__)
 
 CPA_DIR = Path(__file__).parent.parent / "cpa_files"
 
+
+def extract_account_id(account_data: Dict) -> str:
+    account_id = account_data.get("account_id", "")
+    if account_id:
+        return str(account_id)
+
+    for key in ("id_token", "access_token"):
+        token = account_data.get(key, "")
+        if token and "." in token:
+            try:
+                parts = token.split(".")
+                if len(parts) < 2:
+                    continue
+                import base64
+                payload_b64 = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8"))
+                auth = payload.get("https://api.openai.com/auth", {}) or {}
+                if auth.get("chatgpt_account_id"):
+                    return str(auth["chatgpt_account_id"])
+            except Exception:
+                continue
+    return ""
+
 def generate_cpa_file(account_data: Dict, email: str) -> Dict:
     """
     Generate CPA authentication file for CLIProxyAPI.
@@ -27,7 +50,7 @@ def generate_cpa_file(account_data: Dict, email: str) -> Dict:
     CPA_DIR.mkdir(parents=True, exist_ok=True)
     
     access_token = account_data.get("access_token", "")
-    account_id = account_data.get("account_id", "")
+    account_id = extract_account_id(account_data)
     
     refresh_token = account_data.get("refresh_token", "")
     id_token = account_data.get("id_token", "")

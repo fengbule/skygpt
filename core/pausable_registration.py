@@ -20,7 +20,8 @@ from core.registration_steps import REGISTRATION_STEPS, get_step_by_id, get_tota
 from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import follow_authorize, request_sentinel_token, build_sentinel_header, validate_email_otp, create_account
-from core.account_export import follow_oauth_callback, fetch_session
+from core.account_export import follow_oauth_callback, fetch_session, extract_account_id_from_tokens
+from core.codex_oauth import acquire_codex_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -261,19 +262,27 @@ class PausableRegistration:
             
             self._update_step(task_id, 11, "completed", f"获取 Token 成功")
             
-            self._update_step(task_id, 12, "running", "正在生成 CPA 文件...")
-            account_id = session_info.get("user", {}).get("id", "")
+            self._update_step(task_id, 12, "running", "正在获取 Codex OAuth 凭据并生成 CPA 文件...")
+            codex_tokens = acquire_codex_tokens(session, session_info=session_info)
+            codex_access_token = codex_tokens.get("access_token") or access_token
+            account_id = extract_account_id_from_tokens(
+                codex_access_token,
+                codex_tokens.get("id_token"),
+                session_info=session_info,
+            )
             
             account_data = {
-                "access_token": access_token,
+                "access_token": codex_access_token,
                 "account_id": account_id,
+                "refresh_token": codex_tokens.get("refresh_token", ""),
+                "id_token": codex_tokens.get("id_token", ""),
                 "email": email
             }
             
             cpa_data = generate_cpa_file(account_data, email)
             self._update_step(task_id, 12, "completed", f"CPA 文件已生成")
             
-            self._complete_task(task_id, email, account_id, access_token, cpa_data)
+            self._complete_task(task_id, email, account_id, codex_access_token, cpa_data)
         
         except Exception as e:
             error_msg = str(e)[:500]
