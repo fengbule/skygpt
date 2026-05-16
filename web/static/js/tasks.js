@@ -1,6 +1,7 @@
 // SkyGPT Tasks JavaScript - Real-time Progress Visualization
 let socket = null;
 let currentTaskId = null;
+let taskRefreshTimer = null;
 
 const REGISTRATION_STEPS = [
     {id: 1, name: "获取 Providers"},
@@ -20,6 +21,7 @@ const REGISTRATION_STEPS = [
 document.addEventListener('DOMContentLoaded', function() {
     loadTasks();
     initWebSocket();
+    setInterval(loadTasks, 5000);
     
     document.getElementById('refreshTasksBtn').addEventListener('click', loadTasks);
     document.getElementById('statusFilter').addEventListener('change', loadTasks);
@@ -136,6 +138,76 @@ function addLogEntry(message, level = 'INFO') {
     logsContainer.scrollTop = logsContainer.scrollHeight;
 }
 
+function renderTaskLogs(logs = []) {
+    const logsContainer = document.getElementById('logsContainer');
+    logsContainer.innerHTML = '';
+
+    if (!logs.length) {
+        logsContainer.innerHTML = '<div style="color: #858585;">暂无日志，等待任务继续执行...</div>';
+        return;
+    }
+
+    logs.forEach(log => {
+        const level = log.level || 'INFO';
+        const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+        const logDiv = document.createElement('div');
+        logDiv.className = `log-entry ${level}`;
+        logDiv.innerHTML = `<span class="log-time">[${timestamp}]</span> ${log.message}`;
+        logsContainer.appendChild(logDiv);
+    });
+
+    logsContainer.scrollTop = logsContainer.scrollHeight;
+}
+
+function applyStepStatuses(stepStatus = {}) {
+    Object.entries(stepStatus).forEach(([stepId, status]) => {
+        updateStepProgress(Number(stepId), status);
+    });
+}
+
+function syncTaskDetail(task) {
+    if (!task) return;
+
+    document.getElementById('taskStatus').textContent = getStatusText(task.status);
+    document.getElementById('cancelTaskBtn').disabled = !['pending', 'running', 'waiting_for_input'].includes(task.status);
+
+    renderProgressBar();
+    applyStepStatuses(task.step_status || {});
+    renderTaskLogs(task.logs || []);
+
+    if (task.status === 'waiting_for_input' && task.waiting_for) {
+        showOTPModal(task.waiting_for);
+    } else {
+        hideOTPModal();
+    }
+}
+
+function fetchTaskDetail(taskId) {
+    return fetch(`/api/tasks/${taskId}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.task) {
+                syncTaskDetail(data.task);
+                socket.emit('subscribe_task', {task_id: taskId});
+            }
+        })
+        .catch(err => {
+            console.error('Load task detail error:', err);
+        });
+}
+
+function startTaskRefresh(taskId) {
+    if (taskRefreshTimer) {
+        clearInterval(taskRefreshTimer);
+    }
+
+    taskRefreshTimer = setInterval(() => {
+        if (currentTaskId === taskId) {
+            fetchTaskDetail(taskId);
+        }
+    }, 3000);
+}
+
 function loadTasks() {
     const status = document.getElementById('statusFilter').value;
     
@@ -200,26 +272,10 @@ function viewTask(taskId, email) {
     
     document.getElementById('taskDetailSection').style.display = 'block';
     document.getElementById('taskEmail').textContent = email;
-    
-    fetch(`/api/tasks/${taskId}`)
-        .then(r => r.json())
-        .then(data => {
-            if (data.task) {
-                document.getElementById('taskStatus').textContent = getStatusText(data.task.status);
-                renderProgressBar();
-                
-                if (data.task.status === 'running' || data.task.status === 'waiting_for_input') {
-                    document.getElementById('cancelTaskBtn').disabled = false;
-                } else {
-                    document.getElementById('cancelTaskBtn').disabled = true;
-                }
-                
-                socket.emit('subscribe_task', {task_id: taskId});
-            }
-        });
-    
-    document.getElementById('logsContainer').innerHTML = '';
-    addSystemLog(`正在加载任务 ${taskId} 的实时日志...`);
+
+    document.getElementById('logsContainer').innerHTML = '<div style="color: #858585;">正在加载任务详情...</div>';
+    fetchTaskDetail(taskId);
+    startTaskRefresh(taskId);
 }
 
 function renderProgressBar() {

@@ -8,6 +8,7 @@ import threading
 import time
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, List
 from concurrent.futures import ThreadPoolExecutor
 import random
@@ -45,12 +46,14 @@ class PausableRegistration:
         self.socketio = socketio
     
     def start_task(self, task_id: int, email: str, name: str = None, birthday: str = "2000-01-01", proxy: str = None):
+        db_task = TaskDB.get_task(task_id) or {}
         task_data = {
             "task_id": task_id,
             "email": email,
             "name": name or self._generate_display_name(),
             "birthday": birthday,
             "proxy": proxy,
+            "log_file": db_task.get("log_file"),
             "status": "pending",
             "current_step": 0,
             "step_status": {},
@@ -94,6 +97,16 @@ class PausableRegistration:
             
             if task_id in self.task_logs:
                 self.task_logs[task_id].append(f"[{level}] {message}")
+
+            log_file = task_data.get("log_file")
+            if log_file:
+                try:
+                    log_path = Path(log_file)
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    with log_path.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+                except Exception:
+                    logger.debug(f"[Task {task_id}] 写入日志文件失败", exc_info=True)
             
             self._emit_task_update(task_id, "log_update", {"log": log_entry})
     
@@ -135,6 +148,7 @@ class PausableRegistration:
         
         task_data["status"] = "waiting_for_input"
         task_data["waiting_for"] = input_type
+        TaskDB.update_task(task_id, status="waiting_for_input")
         
         self._emit_task_update(task_id, "waiting_for_input", {
             "input_type": input_type,
@@ -150,6 +164,7 @@ class PausableRegistration:
             if otp_data:
                 task_data["status"] = "running"
                 task_data["waiting_for"] = None
+                TaskDB.update_task(task_id, status="running")
                 return otp_data
             
             time.sleep(0.5)
@@ -269,6 +284,7 @@ class PausableRegistration:
         task_data = self.tasks.get(task_id)
         if task_data:
             task_data["status"] = "success"
+            task_data["waiting_for"] = None
             task_data["completed_at"] = datetime.now().isoformat(timespec="seconds")
             
             TaskDB.update_task(
@@ -304,6 +320,7 @@ class PausableRegistration:
         task_data = self.tasks.get(task_id)
         if task_data:
             task_data["status"] = "failed"
+            task_data["waiting_for"] = None
             task_data["completed_at"] = datetime.now().isoformat(timespec="seconds")
             
             TaskDB.update_task(task_id, status="failed", error=error, completed_at=datetime.now().isoformat(timespec="seconds"))
@@ -359,7 +376,33 @@ class PausableRegistration:
         return True
     
     def get_task_status(self, task_id: int) -> Optional[Dict]:
-        return self.tasks.get(task_id)
+        return self.get_task_snapshot(task_id)
+
+    def get_task_snapshot(self, task_id: int) -> Optional[Dict]:
+        task_data = self.tasks.get(task_id)
+        if not task_data:
+            return None
+
+        return {
+            "task_id": task_data["task_id"],
+            "email": task_data.get("email"),
+            "name": task_data.get("name"),
+            "birthday": task_data.get("birthday"),
+            "proxy": task_data.get("proxy"),
+            "status": task_data.get("status"),
+            "current_step": task_data.get("current_step", 0),
+            "step_status": dict(task_data.get("step_status", {})),
+            "waiting_for": task_data.get("waiting_for"),
+            "started_at": task_data.get("started_at"),
+            "completed_at": task_data.get("completed_at"),
+            "logs": list(task_data.get("logs", [])),
+        }
+
+    def list_task_snapshots(self) -> Dict[int, Dict]:
+        return {
+            task_id: self.get_task_snapshot(task_id)
+            for task_id in self.tasks.keys()
+        }
     
     def get_task_logs(self, task_id: int) -> List[str]:
         return self.task_logs.get(task_id, [])

@@ -5,12 +5,14 @@ Flask + SocketIO for real-time log streaming
 """
 import os
 import logging
+from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 from web.api_tasks import task_bp
 from web.api_proxies import proxy_bp
 from web.api_cpa import cpa_bp
+from web.database import TaskDB
 from core.pausable_registration import RegistrationManager
 
 logging.basicConfig(
@@ -41,6 +43,27 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 reg_manager = RegistrationManager.get_instance()
 reg_manager.set_socketio(socketio)
+
+
+def cleanup_stale_tasks():
+    stale_statuses = {"pending", "running", "waiting_for_input"}
+    stale_tasks = [task for task in TaskDB.list_tasks() if task.get("status") in stale_statuses]
+    if not stale_tasks:
+        return
+
+    finished_at = datetime.now().isoformat(timespec="seconds")
+    for task in stale_tasks:
+        TaskDB.update_task(
+            task["id"],
+            status="failed",
+            error="任务因服务重启中断，请重新创建任务",
+            completed_at=finished_at,
+        )
+
+    logger.warning(f"Recovered {len(stale_tasks)} stale tasks after restart")
+
+
+cleanup_stale_tasks()
 
 @app.route("/")
 def index():

@@ -13,4 +13,4 @@ RUN mkdir -p /app/data /app/cpa_files /app/logs
 
 EXPOSE 5000
 
-CMD ["python", "web/app.py"]
+CMD ["python", "-m", "web.app"]
