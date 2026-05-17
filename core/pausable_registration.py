@@ -16,6 +16,12 @@ import string
 
 from web.database import TaskDB
 from core.cpa_generator import generate_cpa_file
+from core.chatgpt_browser_flow import (
+    SkyGPTPhoneCallback,
+    generate_openai_compatible_password,
+    normalize_browser_result,
+    run_chatgpt_phone_browser_registration,
+)
 from core.registration_steps import REGISTRATION_STEPS, get_step_by_id, get_total_steps
 from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
@@ -253,6 +259,103 @@ class PausableRegistration:
 
             logger.info(f"[Task {task_id}] Phone framework completed")
 
+    def _wait_for_email_otp_callback(self, task_id: int):
+        self._update_step(task_id, 5, "waiting", "等待用户输入邮箱验证码...")
+        otp_input = self._wait_for_user_input(task_id, "email_otp")
+        if not otp_input:
+            return None
+        return str(otp_input.get("otp_code") or "").strip() or None
+
+    def _run_phone_browser_task(self, task_id: int):
+        task_data = self.tasks.get(task_id)
+        if not task_data:
+            return
+
+        settings = self._build_sms_settings(task_data)
+        provider_name = task_data.get("sms_provider") or "hero_sms"
+        phone_country = task_data.get("phone_country")
+        sms_service_code = task_data.get("sms_service_code")
+        headless = True
+        browser_type = str(task_data.get("browser_type") or "chromium").strip().lower()
+        registration_password = generate_openai_compatible_password()
+
+        self._add_log(
+            task_id,
+            f"开始 ChatGPT 浏览器手机号注册：provider={provider_name}, country={phone_country}, service={sms_service_code}, browser={browser_type}",
+        )
+
+        self._update_step(task_id, 1, "running", "正在初始化浏览器手机号注册流程...")
+        self._update_step(task_id, 1, "completed", "浏览器手机号注册流程初始化完成")
+
+        phone_callback = SkyGPTPhoneCallback(
+            provider=provider_name,
+            settings=settings,
+            task_data=task_data,
+            on_log=lambda message, level="INFO": self._add_log(task_id, message, level),
+            on_waiting=lambda input_type, context=None: self._set_auto_waiting_state(task_id, input_type, context),
+            poll_interval=task_data.get("sms_poll_interval"),
+            max_wait=task_data.get("sms_max_wait"),
+        )
+
+        try:
+            self._update_step(task_id, 2, "running", "正在启动真实浏览器并执行手机号注册...")
+            raw_result = run_chatgpt_phone_browser_registration(
+                email=task_data.get("email") or "",
+                password=registration_password,
+                proxy=task_data.get("proxy"),
+                headless=headless,
+                browser_type=browser_type,
+                otp_callback=lambda: self._wait_for_email_otp_callback(task_id),
+                phone_callback=phone_callback,
+                log_fn=lambda message: self._add_log(task_id, message),
+            )
+            self._update_step(task_id, 2, "completed", "浏览器手机号注册流程执行完成")
+        finally:
+            phone_callback.cleanup()
+
+        result = normalize_browser_result(raw_result)
+        task_data["phone_number"] = task_data.get("phone_number") or phone_callback.task_data.get("phone_number")
+        task_data["sms_activation_id"] = task_data.get("sms_activation_id") or phone_callback.task_data.get("sms_activation_id")
+
+        self._update_step(task_id, 9, "running", "正在整理浏览器注册结果...")
+        account_id = result.get("account_id")
+        access_token = result.get("access_token")
+        account_data = {
+            "access_token": access_token,
+            "account_id": account_id,
+            "refresh_token": result.get("refresh_token", ""),
+            "id_token": result.get("id_token", ""),
+            "email": result.get("email") or task_data.get("email") or "",
+            "password": result.get("password") or registration_password,
+        }
+        cpa_data = generate_cpa_file(account_data, task_data.get("email") or result.get("email") or "")
+        self._update_step(task_id, 9, "completed", "浏览器注册结果整理完成")
+
+        self._update_step(task_id, 10, "completed", "手机号验证已自动完成")
+        self._update_step(task_id, 11, "completed", "OAuth / Token 获取完成")
+        self._update_step(task_id, 12, "completed", "CPA 文件已生成")
+
+        self._complete_task(
+            task_id,
+            task_data.get("email") or result.get("email") or "",
+            account_id,
+            access_token,
+            cpa_data,
+        )
+
+    def _set_auto_waiting_state(self, task_id: int, input_type: str, context: Dict | None = None):
+        task_data = self.tasks.get(task_id)
+        if not task_data:
+            return
+        task_data["status"] = "running"
+        task_data["waiting_for"] = input_type
+        task_data["waiting_context"] = context or None
+        self._emit_task_update(task_id, "waiting_for_input", {
+            "input_type": input_type,
+            "message": f"{input_type} 阶段处理中",
+            "context": task_data["waiting_context"],
+        })
+
     def _run_phone_framework_task(self, task_id: int):
         task_data = self.tasks.get(task_id)
         if not task_data:
@@ -385,7 +488,7 @@ class PausableRegistration:
             )
 
             if task_data.get("registration_mode") == "phone":
-                self._run_phone_framework_task(task_id)
+                self._run_phone_browser_task(task_id)
                 return
             
             email = task_data["email"]

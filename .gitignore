@@ -42,3 +42,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+any-auto-register/
+skygpt_clean/
